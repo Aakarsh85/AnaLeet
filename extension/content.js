@@ -168,9 +168,12 @@
           submitCode.submissionId ?? submitCode.submission_id ?? submitCode.id;
         if (!submissionId) return;
 
+        // ✅ Prevent duplicate increments
+        if (state.pendingSubmissionId === submissionId) return;
+
         state.attempts += 1;
         state.pendingSubmissionId = submissionId;
-        sendEvent(EVENTS.SUBMISSION_ATTEMPT);
+        sendEvent(EVENTS.SUBMISSION_ATTEMPT, { submissionId });
 
         // Fallback: if submissionDetails never arrives, clear the pending ID
         // so a stale ID cannot match a future response.
