@@ -8,7 +8,7 @@
   "use strict";
 
   // ─── Constants ────────────────────────────────────────────────────────────
-  const IDLE_THRESHOLD_MS = 60_000; // 60 s of no interaction → idle
+  const IDLE_THRESHOLD_MS = 60_000;    // 60 s of no interaction → idle
   const SYNC_INTERVAL_MS = 5 * 60_000; // flush locally every 5 min
   const EVENTS = {
     PROBLEM_OPENED: "problem_opened",
@@ -35,10 +35,29 @@
     lastTickAt: null,
     hasFirstInteraction: false,
     acceptedSubmissionId: null,
-    pendingSubmissionId: null,   // bridges submitCode → submissionDetails
+    pendingSubmissionId: null, // bridges submitCode → submissionDetails
     tickTimer: null,
     idleTimer: null,
   };
+
+  // Tracks the current problem slug so SPA navigation can detect a real change
+  let currentSlug = "";
+
+  // Holds the MutationObserver from watchRunButton so it can be disconnected
+  // before re-attaching on SPA navigation
+  let runButtonObserver = null;
+
+  // ─── Extension context guard ───────────────────────────────────────────────
+  // The service worker can be killed at any time (MV3), and reloading the
+  // extension orphans any already-injected content script. Every call to
+  // chrome.runtime must be guarded or it throws "Extension context invalidated".
+  function isContextValid() {
+    try {
+      return !!chrome.runtime?.id;
+    } catch (_) {
+      return false;
+    }
+  }
 
   // ─── Helpers ───────────────────────────────────────────────────────────────
   function parseProblemSlug() {
@@ -137,13 +156,63 @@
   document.addEventListener("mousedown", onInteraction, { passive: true });
   document.addEventListener("scroll", onInteraction, { passive: true });
 
-  // ─── GraphQL interception (passive) ─────────────────────────────────────────
+  // ─── Fetch interception (passive) ────────────────────────────────────────────
   const _origFetch = window.fetch;
   window.fetch = async function (...args) {
     const response = await _origFetch.apply(this, args);
 
     try {
       const url = typeof args[0] === "string" ? args[0] : args[0]?.url || "";
+
+      // ── REST: submit/ ────────────────────────────────────────────────────────
+      // LeetCode POSTs to /problems/{slug}/submit/ and returns { submission_id }
+      // This is where we capture the ID and increment attempts.
+      if (url.includes("/submit/")) {
+        const clone = response.clone();
+        clone.json().then((data) => {
+          const submissionId = data?.submission_id;
+          if (!submissionId) return;
+
+          state.attempts += 1;
+          state.pendingSubmissionId = String(submissionId);
+          sendEvent(EVENTS.SUBMISSION_ATTEMPT);
+
+          // Fallback: clear pending ID if check/ never resolves
+          const captured = String(submissionId);
+          setTimeout(() => {
+            if (state.pendingSubmissionId === captured) {
+              state.pendingSubmissionId = null;
+            }
+          }, 30_000);
+        }).catch(() => {});
+      }
+
+      // ── REST: check/ ─────────────────────────────────────────────────────────
+      // LeetCode polls /submissions/detail/{id}/check/ until finished === true.
+      // The final response carries status_code and status_msg.
+      if (url.includes("/check/")) {
+        const clone = response.clone();
+        clone.json().then((data) => {
+          // Ignore intermediate polls — only process the terminal response
+          if (!data?.finished) return;
+
+          const submissionId = String(data?.submission_id ?? "");
+          if (!submissionId || state.pendingSubmissionId !== submissionId) return;
+
+          // Terminal result — always clear pending regardless of outcome
+          state.pendingSubmissionId = null;
+
+          if (data.status_code === 10 || data.status_msg === "Accepted") {
+            const runtimeMs = data.status_runtime
+              ? parseInt(data.status_runtime, 10)
+              : null;
+            handleAccepted({ submissionId, runtimeMs });
+          }
+        }).catch(() => {});
+      }
+
+      // ── GraphQL ───────────────────────────────────────────────────────────────
+      // Kept as a fallback in case LeetCode changes the REST flow.
       if (url.includes("/graphql")) {
         const clone = response.clone();
         clone.json().then((data) => {
@@ -173,7 +242,7 @@
 
         state.attempts += 1;
         state.pendingSubmissionId = submissionId;
-        sendEvent(EVENTS.SUBMISSION_ATTEMPT, { submissionId });
+        sendEvent(EVENTS.SUBMISSION_ATTEMPT);
 
         // Fallback: if submissionDetails never arrives, clear the pending ID
         // so a stale ID cannot match a future response.
@@ -196,12 +265,13 @@
 
         if (!submissionId) return;
 
-        // ✅ ONLY process if it matches current submission
+        // Only process if it matches the current pending submission
         if (state.pendingSubmissionId !== submissionId) return;
 
         const statusCode = details.statusCode ?? details.status_code;
+        if (statusCode === undefined) return;
 
-        // Now safe to clear
+        // Always clear pending — terminal result regardless of outcome.
         state.pendingSubmissionId = null;
 
         if (statusCode === 10 || details.statusDisplay === "Accepted") {
@@ -221,7 +291,21 @@
 
   // ─── Run Code button detection (DOM-based fallback) ─────────────────────────
   function watchRunButton() {
-    const observer = new MutationObserver(() => {
+    // Disconnect any previous observer before creating a new one.
+    // Without this, every SPA navigation stacks another observer.
+    if (runButtonObserver) {
+      runButtonObserver.disconnect();
+      runButtonObserver = null;
+    }
+
+    runButtonObserver = new MutationObserver(() => {
+      // Stop immediately if the extension context is gone
+      if (!isContextValid()) {
+        runButtonObserver.disconnect();
+        runButtonObserver = null;
+        return;
+      }
+
       const runBtn = document.querySelector(
         '[data-e2e-locator="console-run-button"], button[data-cy="run-code-btn"]'
       );
@@ -232,7 +316,8 @@
         });
       }
     });
-    observer.observe(document.body, { childList: true, subtree: true });
+
+    runButtonObserver.observe(document.body, { childList: true, subtree: true });
   }
 
   // ─── Accepted flow ──────────────────────────────────────────────────────────
@@ -262,25 +347,55 @@
   }
 
   function sendEvent(type, extra = {}) {
-    chrome.runtime.sendMessage({
-      type: "LEETFLOW_EVENT",
-      event: type,
-      data: { ...buildRecord(), ...extra },
-    });
+    if (!isContextValid()) return;
+    try {
+      chrome.runtime.sendMessage({
+        type: "LEETFLOW_EVENT",
+        event: type,
+        data: { ...buildRecord(), ...extra },
+      });
+    } catch (_) {}
   }
 
   function flushToBackground({ final = false } = {}) {
-    chrome.runtime.sendMessage({
-      type: "LEETFLOW_FLUSH",
-      data: buildRecord(),
-      final,
-    });
+    if (!isContextValid()) return;
+    try {
+      chrome.runtime.sendMessage({
+        type: "LEETFLOW_FLUSH",
+        data: buildRecord(),
+        final,
+      });
+    } catch (_) {}
   }
 
   // ─── Periodic local flush ───────────────────────────────────────────────────
   setInterval(() => {
-    if (state.isTracking) flushToBackground();
+    if (state.isTracking && isContextValid()) flushToBackground();
   }, SYNC_INTERVAL_MS);
+
+  // ─── State reset (called on SPA navigation to a new problem) ───────────────
+  function resetState() {
+    stopTick();
+    clearTimeout(state.idleTimer);
+
+    state.problemName = "";
+    state.difficulty = "";
+    state.tags = [];
+    state.sessionId = "";
+    state.startedAt = null;
+    state.activeMs = 0;
+    state.attempts = 0;
+    state.status = "in_progress";
+    state.isTracking = false;
+    state.isIdle = false;
+    state.lastActivityAt = null;
+    state.lastTickAt = null;
+    state.hasFirstInteraction = false;
+    state.acceptedSubmissionId = null;
+    state.pendingSubmissionId = null;
+    state.tickTimer = null;
+    state.idleTimer = null;
+  }
 
   // ─── Init ───────────────────────────────────────────────────────────────────
   function init() {
@@ -307,9 +422,52 @@
     }, 3000);
   }
 
-  // Guard: only run on problem pages
+  // ─── SPA navigation detection ───────────────────────────────────────────────
+  // LeetCode uses history.pushState — navigating between problems is never a
+  // real page load. We intercept pushState and popstate to detect URL changes
+  // and re-init tracking when the user lands on a new problem.
+  function onUrlChange() {
+    const slug = parseProblemSlug();
+    const isProblemPage = /\/problems\//.test(window.location.pathname);
+
+    if (!isProblemPage) {
+      // Navigated away from problems entirely — flush and stop
+      if (state.isTracking) flushToBackground({ final: true });
+      resetState();
+      currentSlug = "";
+      return;
+    }
+
+    if (slug === currentSlug) return; // Same problem (e.g. tab switch) — do nothing
+
+    // New problem — flush previous session if mid-tracking, then re-init
+    if (state.isTracking) flushToBackground({ final: true });
+    resetState();
+    currentSlug = slug;
+
+    // Small delay to let LeetCode's React router finish rendering the new page
+    setTimeout(init, 800);
+  }
+
+  // Wrap history.pushState to fire our handler
+  const _origPushState = history.pushState.bind(history);
+  history.pushState = function (...args) {
+    _origPushState(...args);
+    onUrlChange();
+  };
+
+  const _origReplaceState = history.replaceState.bind(history);
+  history.replaceState = function (...args) {
+    _origReplaceState(...args);
+    onUrlChange();
+  };
+
+  // Back / forward navigation
+  window.addEventListener("popstate", onUrlChange);
+
+  // ─── Initial page load ──────────────────────────────────────────────────────
   if (/\/problems\//.test(window.location.pathname)) {
-    // Wait for page to be interactive
+    currentSlug = parseProblemSlug();
     if (document.readyState === "loading") {
       document.addEventListener("DOMContentLoaded", init);
     } else {
@@ -317,24 +475,28 @@
     }
   }
 
-  // ─── Cleanup on navigation ──────────────────────────────────────────────────
+  // ─── Cleanup on hard unload ─────────────────────────────────────────────────
   window.addEventListener("beforeunload", () => {
     if (state.isTracking) flushToBackground({ final: true });
     stopTick();
   });
 
   // ─── Message bridge: popup queries ─────────────────────────────────────────
-  chrome.runtime.onMessage.addListener((msg, _sender, respond) => {
-    if (msg.type === "GET_CURRENT_SESSION") {
-      respond({
-        activeMs: state.activeMs,
-        problemName: state.problemName,
-        difficulty: state.difficulty,
-        isTracking: state.isTracking,
-        attempts: state.attempts,
-        status: state.status,
-      });
-    }
-    return true;
-  });
+  try {
+    chrome.runtime.onMessage.addListener((msg, _sender, respond) => {
+      if (msg.type === "GET_CURRENT_SESSION") {
+        respond({
+          activeMs: state.activeMs,
+          problemName: state.problemName,
+          difficulty: state.difficulty,
+          isTracking: state.isTracking,
+          attempts: state.attempts,
+          status: state.status,
+        });
+      }
+      return true;
+    });
+  } catch (_) {
+    // Context already invalidated at registration time — nothing to do
+  }
 })();
