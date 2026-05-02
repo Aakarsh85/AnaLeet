@@ -11,7 +11,8 @@
   ],
   "host_permissions": [
     "https://leetcode.com/*",
-    "https://*.supabase.co/*"
+    "https://*.supabase.co/*",
+    "https://ana-leet.vercel.app/*"
   ],
   "background": {
     "service_worker": "background.js",
@@ -21,6 +22,11 @@
     {
       "matches": ["https://leetcode.com/problems/*"],
       "js": ["content.js"],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": ["https://ana-leet.vercel.app/*"],
+      "js": ["auth-bridge.js"],
       "run_at": "document_idle"
     }
   ],
