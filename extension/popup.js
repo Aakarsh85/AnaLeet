@@ -2,7 +2,7 @@
  * LeetFlow Popup Script
  */
 
-const DASHBOARD_URL = "http://localhost:5173"; // Change to deployed URL when live
+const DASHBOARD_URL = "https://ana-leet.vercel.app/"; // Change to deployed URL when live
 const DAILY_GOAL = 5;
 
 // ─── DOM refs ─────────────────────────────────────────────────────────────────
