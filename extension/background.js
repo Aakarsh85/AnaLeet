@@ -63,8 +63,11 @@ async function syncToSupabase() {
   const queue = await getQueue();
   if (!queue.length) return;
 
-  const token = await getAuthToken();
-  if (!token) {
+  const { session } = await chrome.storage.local.get({ session: null });
+  const token = session?.access_token ?? null;
+  const userId = session?.user?.id ?? null;
+
+  if (!token || !userId) {
     console.warn("[LeetFlow] Not authenticated — skipping sync");
     return;
   }
@@ -82,7 +85,7 @@ async function syncToSupabase() {
         Prefer: "resolution=merge-duplicates",
       },
       body: JSON.stringify(
-        toSync.map(({ _queued_at, ...r }) => r)
+        toSync.map(({ _queued_at, ...r }) => ({ ...r, user_id: userId }))
       ),
     });
 
