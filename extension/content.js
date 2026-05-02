@@ -35,6 +35,7 @@
     lastTickAt: null,
     hasFirstInteraction: false,
     acceptedSubmissionId: null,
+    pendingSubmissionId: null,   // bridges submitCode → submissionDetails
     tickTimer: null,
     idleTimer: null,
   };
@@ -157,27 +158,61 @@
   };
 
   function handleGraphQLResponse(data) {
-    // Detect submission result
     try {
-      const submission =
-        data?.data?.submissionDetails ||
-        data?.data?.submitCode ||
-        data?.data?.interpret_expected_result;
+      // ── Case 1: submitCode ─────────────────────────────────────────────────
+      // Shape: { submissionId } only — no status yet.
+      // This is the ONLY place we increment attempts.
+      const submitCode = data?.data?.submitCode;
+      if (submitCode) {
+        const submissionId =
+          submitCode.submissionId ?? submitCode.submission_id ?? submitCode.id;
+        if (!submissionId) return;
 
-      if (!submission) return;
-
-      const statusCode = submission.statusCode ?? submission.status_code;
-      const runtimeMs = submission.runtimePercentile ?? submission.runtime;
-      const submissionId = submission.id ?? submission.submissionId;
-
-      if (statusCode !== undefined) {
         state.attempts += 1;
-        sendEvent(EVENTS.SUBMISSION_ATTEMPT, { statusCode, runtimeMs });
+        state.pendingSubmissionId = submissionId;
+        sendEvent(EVENTS.SUBMISSION_ATTEMPT);
 
-        if (statusCode === 10 || submission.statusDisplay === "Accepted") {
+        // Fallback: if submissionDetails never arrives, clear the pending ID
+        // so a stale ID cannot match a future response.
+        const captured = submissionId;
+        setTimeout(() => {
+          if (state.pendingSubmissionId === captured) {
+            state.pendingSubmissionId = null;
+          }
+        }, 30_000);
+
+        return;
+      }
+
+      // ── Case 2: submissionDetails ──────────────────────────────────────────
+      // Shape: { statusCode, statusDisplay, runtimeMs, id, … }
+      // This is where the actual result (Accepted / WA / TLE / …) lives.
+      const details = data?.data?.submissionDetails;
+      if (details) {
+        const submissionId = details.submissionId ?? details.id;
+
+        if (!submissionId) return;
+
+        // ✅ ONLY process if it matches current submission
+        if (state.pendingSubmissionId !== submissionId) return;
+
+        const statusCode = details.statusCode ?? details.status_code;
+
+        // Now safe to clear
+        state.pendingSubmissionId = null;
+
+        if (statusCode === 10 || details.statusDisplay === "Accepted") {
+          const runtimeMs = details.runtimeMs ?? details.runtime ?? null;
           handleAccepted({ submissionId, runtimeMs });
         }
+
+        return;
       }
+
+      // ── Case 3: interpret_expected_result ──────────────────────────────────
+      // Run Code — not a submission. Ignore entirely.
+      if (data?.data?.interpret_expected_result) return;
+
     } catch (_) {}
   }
 
