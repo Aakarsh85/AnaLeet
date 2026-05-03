@@ -106,6 +106,16 @@ export default function Layout() {
               <p style={{ fontSize: 10, color: "#6b7280" }}>Pro</p>
             </div>
           </div>
+          <a
+            href="/leetflow-extension.zip"
+            download="leetflow-extension.zip"
+            style={{ width: "100%", padding: "8px 16px", background: "rgba(0,112,255,0.08)", border: "1px solid rgba(0,112,255,0.2)", color: "#568dff", fontSize: 12, display: "flex", alignItems: "center", gap: 8, cursor: "pointer", borderRadius: 8, transition: "all 0.15s", marginBottom: 4, textDecoration: "none" }}
+            onMouseEnter={e => { e.currentTarget.style.background = "rgba(0,112,255,0.15)"; e.currentTarget.style.borderColor = "rgba(0,112,255,0.4)"; }}
+            onMouseLeave={e => { e.currentTarget.style.background = "rgba(0,112,255,0.08)"; e.currentTarget.style.borderColor = "rgba(0,112,255,0.2)"; }}
+          >
+            <span className="material-symbols-outlined" style={{ fontSize: 18 }}>extension</span>
+            Download Extension
+          </a>
           <button onClick={handleSignOut} style={{ width: "100%", padding: "8px 16px", background: "transparent", border: "none", color: "#6b7280", fontSize: 12, display: "flex", alignItems: "center", gap: 8, cursor: "pointer", borderRadius: 8, transition: "color 0.15s" }}
             onMouseEnter={e => e.currentTarget.style.color = "#e5e1e4"}
             onMouseLeave={e => e.currentTarget.style.color = "#6b7280"}>
