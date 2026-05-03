@@ -27,8 +27,11 @@ async function setStats(stats) {
 }
 
 // ─── Deduplication key ────────────────────────────────────────────────────────
+// Keyed by problem_name + date so solving the same problem twice in one day
+// merges into a single record rather than creating two separate accepted entries.
 function dedupKey(record) {
-  return `${record.problem_name}__${record.session_id}`;
+  const date = (record.started_at ?? record.session_id ?? "").slice(0, 10);
+  return `${record.problem_name}__${date}`;
 }
 
 // ─── Queue incoming records ───────────────────────────────────────────────────
@@ -59,11 +62,63 @@ async function getAuthToken() {
   return session?.access_token ?? null;
 }
 
+// ─── Token refresh ────────────────────────────────────────────────────────────
+// Silently refreshes the Supabase session using the stored refresh_token.
+// Writes the new session back to storage so auth-bridge stays in sync.
+
+// isTokenExpired() compares session.expires_at against current Unix time with a 60-second buffer. Supabase tokens expire after 1 hour — your session from yesterday was well past that.
+// refreshSession() calls Supabase's standard /auth/v1/token?grant_type=refresh_token endpoint, gets a new session object back, and writes it to storage. The next time auth-bridge reads localStorage on the dashboard, it'll pick up the refreshed token too.
+// syncToSupabase() now checks expiry first and refreshes before attempting the fetch — so sync never silently fails due to a stale token again.
+
+// add token expiry check before syncing, and if expired, attempt a refresh using the refresh_token before bailing
+async function refreshSession() {
+  const { session } = await chrome.storage.local.get({ session: null });
+  const refreshToken = session?.refresh_token ?? null;
+  if (!refreshToken) return null;
+
+  try {
+    const res = await fetch(`${SUPABASE_URL}/auth/v1/token?grant_type=refresh_token`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        apikey: SUPABASE_ANON_KEY,
+      },
+      body: JSON.stringify({ refresh_token: refreshToken }),
+    });
+
+    if (!res.ok) {
+      console.warn("[LeetFlow] Token refresh failed", await res.text());
+      return null;
+    }
+
+    const newSession = await res.json();
+    await chrome.storage.local.set({ session: newSession });
+    console.log("[LeetFlow] Token refreshed successfully");
+    return newSession;
+  } catch (err) {
+    console.warn("[LeetFlow] Token refresh error", err.message);
+    return null;
+  }
+}
+
+// Returns true if the stored session token is expired or expiring within 60s
+function isTokenExpired(session) {
+  if (!session?.expires_at) return true;
+  return session.expires_at - 60 < Math.floor(Date.now() / 1000);
+}
+
 async function syncToSupabase() {
   const queue = await getQueue();
   if (!queue.length) return;
 
-  const { session } = await chrome.storage.local.get({ session: null });
+  let { session } = await chrome.storage.local.get({ session: null });
+
+  // Refresh token if expired before attempting sync
+  if (isTokenExpired(session)) {
+    console.log("[LeetFlow] Token expired — refreshing");
+    session = await refreshSession();
+  }
+
   const token = session?.access_token ?? null;
   const userId = session?.user?.id ?? null;
 
@@ -76,7 +131,7 @@ async function syncToSupabase() {
   if (!toSync.length) return;
 
   try {
-    const res = await fetch(`${SUPABASE_URL}/rest/v1/problems`, {
+    const res = await fetch(`${SUPABASE_URL}/rest/v1/problems?on_conflict=user_id,problem_name,session_id`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -140,9 +195,18 @@ chrome.runtime.onMessage.addListener((msg, _sender, respond) => {
     const record = msg.data;
 
     enqueue(record).then(async () => {
-      await updateStats(record);
+      // Before, updateStats fired on every message with status: "accepted". handleAccepted in content.js sends two messages — LEETFLOW_EVENT with the accepted event, then LEETFLOW_FLUSH with final: true. Both had status: "accepted", so stats incremented twice per solve.
+      // Now it only fires when msg.type === "LEETFLOW_FLUSH" && msg.final && record.status === "accepted" — exactly once per accepted submission.
 
-      // Immediate sync on accepted
+      // Only update stats on the final flush of an accepted submission.
+      // LEETFLOW_EVENT messages are informational — counting them would
+      // double-increment stats since handleAccepted fires both an event
+      // and a final flush.
+      if (msg.type === "LEETFLOW_FLUSH" && msg.final && record.status === "accepted") {
+        await updateStats(record);
+      }
+
+      // Immediate sync on accepted or final flush
       if (record.status === "accepted" || msg.final) {
         await syncToSupabase();
       }
