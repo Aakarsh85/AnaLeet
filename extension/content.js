@@ -10,6 +10,7 @@
   // ─── Constants ────────────────────────────────────────────────────────────
   const IDLE_THRESHOLD_MS = 60_000;    // 60 s of no interaction → idle
   const SYNC_INTERVAL_MS = 5 * 60_000; // flush locally every 5 min
+  const MIN_ACTIVE_MS    = 60_000;     // ignore problems opened for less than 1 min
   const EVENTS = {
     PROBLEM_OPENED: "problem_opened",
     FIRST_INTERACTION: "first_interaction",
@@ -344,6 +345,17 @@
     } catch (_) {}
   }
 
+  // ─── Eligible flush ────────────────────────────────────────────────────────
+  // Only flush non-accepted problems as final if the user was actively engaged
+  // for at least MIN_ACTIVE_MS. Skipping short visits prevents cluttering the
+  // dashboard with "failed" records for problems merely glanced at.
+  function flushIfEligible({ final = false } = {}) {
+    if (final && state.status !== "accepted" && state.activeMs < MIN_ACTIVE_MS) {
+      return; // Too short — discard silently
+    }
+    flushToBackground({ final });
+  }
+
   // ─── Periodic local flush ───────────────────────────────────────────────────
   setInterval(() => {
     if (state.isTracking && isContextValid()) flushToBackground();
@@ -409,7 +421,7 @@
     if (!isProblemPage) {
       // Navigated away from problems entirely — flush and stop.
       // If already accepted, stats were counted by handleAccepted — don't re-trigger.
-      if (state.isTracking) flushToBackground({ final: state.status !== "accepted" });
+      if (state.isTracking) flushIfEligible({ final: state.status !== "accepted" });
       resetState();
       currentSlug = "";
       return;
@@ -419,7 +431,7 @@
 
     // New problem — flush previous session if mid-tracking, then re-init.
     // If already accepted, stats were counted by handleAccepted — don't re-trigger.
-    if (state.isTracking) flushToBackground({ final: state.status !== "accepted" });
+    if (state.isTracking) flushIfEligible({ final: state.status !== "accepted" });
     resetState();
     currentSlug = slug;
 
@@ -456,7 +468,7 @@
   // ─── Cleanup on hard unload ─────────────────────────────────────────────────
   window.addEventListener("beforeunload", () => {
     // If already accepted, stats were counted by handleAccepted — don't re-trigger.
-    if (state.isTracking) flushToBackground({ final: state.status !== "accepted" });
+    if (state.isTracking) flushIfEligible({ final: state.status !== "accepted" });
     stopTick();
   });
 
