@@ -14,6 +14,7 @@ leetflow/
 │   ├── background.js        # Service worker — storage, sync, alarms
 │   ├── popup.html           # Extension popup UI
 │   ├── popup.js             # Popup logic
+│   ├── injected.js          # Runs in the MAIN world (page context) Communicates back to content.js via window.postMessage.
 │   ├── config.js            # ← Add your Supabase credentials here
 │   └── icons/               # Extension icons (add 16, 48, 128px PNGs)
 │

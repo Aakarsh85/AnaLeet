@@ -21,6 +21,12 @@
   "content_scripts": [
     {
       "matches": ["https://leetcode.com/problems/*"],
+      "js": ["injected.js"],
+      "run_at": "document_start",
+      "world": "MAIN"
+    },
+    {
+      "matches": ["https://leetcode.com/problems/*"],
       "js": ["content.js"],
       "run_at": "document_idle"
     },

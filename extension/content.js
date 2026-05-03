@@ -156,75 +156,52 @@
   document.addEventListener("mousedown", onInteraction, { passive: true });
   document.addEventListener("scroll", onInteraction, { passive: true });
 
-  // ─── Fetch interception (passive) ────────────────────────────────────────────
-  const _origFetch = window.fetch;
-  window.fetch = async function (...args) {
-    const response = await _origFetch.apply(this, args);
+  // ─── postMessage bridge (receives from injected.js MAIN world script) ──────────
+  // Content scripts run in an isolated JS world — they cannot intercept LeetCode's
+  // fetch. injected.js runs in the MAIN world and forwards events here via postMessage.
+  window.addEventListener("message", (event) => {
+    if (event.source !== window) return;
+    if (event.data?.source !== "leetflow-injected") return;
 
-    try {
-      const url = typeof args[0] === "string" ? args[0] : args[0]?.url || "";
+    const msg = event.data;
 
-      // ── REST: submit/ ────────────────────────────────────────────────────────
-      // LeetCode POSTs to /problems/{slug}/submit/ and returns { submission_id }
-      // This is where we capture the ID and increment attempts.
-      if (url.includes("/submit/")) {
-        const clone = response.clone();
-        clone.json().then((data) => {
-          const submissionId = data?.submission_id;
-          if (!submissionId) return;
+    // ── SUBMIT: capture submission ID, increment attempts ──────────────────
+    if (msg.type === "SUBMIT") {
+      const submissionId = msg.submissionId;
+      if (!submissionId) return;
 
-          state.attempts += 1;
-          state.pendingSubmissionId = String(submissionId);
-          sendEvent(EVENTS.SUBMISSION_ATTEMPT);
+      state.attempts += 1;
+      state.pendingSubmissionId = submissionId;
+      sendEvent(EVENTS.SUBMISSION_ATTEMPT);
 
-          // Fallback: clear pending ID if check/ never resolves
-          const captured = String(submissionId);
-          setTimeout(() => {
-            if (state.pendingSubmissionId === captured) {
-              state.pendingSubmissionId = null;
-            }
-          }, 30_000);
-        }).catch(() => {});
-      }
-
-      // ── REST: check/ ─────────────────────────────────────────────────────────
-      // LeetCode polls /submissions/detail/{id}/check/ until finished === true.
-      // The final response carries status_code and status_msg.
-      if (url.includes("/check/")) {
-        const clone = response.clone();
-        clone.json().then((data) => {
-          // Ignore intermediate polls — only process the terminal response
-          if (!data?.finished) return;
-
-          const submissionId = String(data?.submission_id ?? "");
-          if (!submissionId || state.pendingSubmissionId !== submissionId) return;
-
-          // Terminal result — always clear pending regardless of outcome
+      // Fallback: clear pending if CHECK never arrives
+      const captured = submissionId;
+      setTimeout(() => {
+        if (state.pendingSubmissionId === captured) {
           state.pendingSubmissionId = null;
-
-          if (data.status_code === 10 || data.status_msg === "Accepted") {
-            const runtimeMs = data.status_runtime
-              ? parseInt(data.status_runtime, 10)
-              : null;
-            handleAccepted({ submissionId, runtimeMs });
-          }
-        }).catch(() => {});
-      }
-
-      // ── GraphQL ───────────────────────────────────────────────────────────────
-      // Kept as a fallback in case LeetCode changes the REST flow.
-      if (url.includes("/graphql")) {
-        const clone = response.clone();
-        clone.json().then((data) => {
-          handleGraphQLResponse(data);
-        }).catch(() => {});
-      }
-    } catch (_) {
-      // Never throw from here
+        }
+      }, 30_000);
     }
 
-    return response;
-  };
+    // ── CHECK: terminal result from polling endpoint ────────────────────────
+    if (msg.type === "CHECK") {
+      const { submissionId, statusCode, statusMsg, statusRuntime } = msg;
+      if (!submissionId || state.pendingSubmissionId !== submissionId) return;
+
+      // Always clear pending — terminal result regardless of outcome
+      state.pendingSubmissionId = null;
+
+      if (statusCode === 10 || statusMsg === "Accepted") {
+        const runtimeMs = statusRuntime ? parseInt(statusRuntime, 10) : null;
+        handleAccepted({ submissionId, runtimeMs });
+      }
+    }
+
+    // ── GRAPHQL: fallback for GraphQL-based submission flows ───────────────
+    if (msg.type === "GRAPHQL") {
+      handleGraphQLResponse(msg.data);
+    }
+  });
 
   function handleGraphQLResponse(data) {
     try {
@@ -262,7 +239,6 @@
       const details = data?.data?.submissionDetails;
       if (details) {
         const submissionId = details.submissionId ?? details.id;
-
         if (!submissionId) return;
 
         // Only process if it matches the current pending submission
@@ -431,8 +407,9 @@
     const isProblemPage = /\/problems\//.test(window.location.pathname);
 
     if (!isProblemPage) {
-      // Navigated away from problems entirely — flush and stop
-      if (state.isTracking) flushToBackground({ final: true });
+      // Navigated away from problems entirely — flush and stop.
+      // If already accepted, stats were counted by handleAccepted — don't re-trigger.
+      if (state.isTracking) flushToBackground({ final: state.status !== "accepted" });
       resetState();
       currentSlug = "";
       return;
@@ -440,8 +417,9 @@
 
     if (slug === currentSlug) return; // Same problem (e.g. tab switch) — do nothing
 
-    // New problem — flush previous session if mid-tracking, then re-init
-    if (state.isTracking) flushToBackground({ final: true });
+    // New problem — flush previous session if mid-tracking, then re-init.
+    // If already accepted, stats were counted by handleAccepted — don't re-trigger.
+    if (state.isTracking) flushToBackground({ final: state.status !== "accepted" });
     resetState();
     currentSlug = slug;
 
@@ -477,7 +455,8 @@
 
   // ─── Cleanup on hard unload ─────────────────────────────────────────────────
   window.addEventListener("beforeunload", () => {
-    if (state.isTracking) flushToBackground({ final: true });
+    // If already accepted, stats were counted by handleAccepted — don't re-trigger.
+    if (state.isTracking) flushToBackground({ final: state.status !== "accepted" });
     stopTick();
   });
 
