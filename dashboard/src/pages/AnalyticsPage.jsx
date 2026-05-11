@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo } from "react";
-import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, Cell, RadarChart, PolarGrid, PolarAngleAxis, Radar } from "recharts";
+import { BarChart, Bar, LineChart, Line, XAxis, YAxis, Tooltip, Legend, ResponsiveContainer, Cell, RadarChart, PolarGrid, PolarAngleAxis, Radar } from "recharts";
 import { useAuth } from "../App.jsx";
-import { fetchProblems, fetchSessions, buildHourlyData, buildSessionData, buildTopicData, buildEfficiencyData } from "../lib/dataProcessor.js";
+import { fetchProblems, fetchSessions, buildHourlyData, buildSessionData, buildTopicData, buildEfficiencyData, buildAttemptEfficiencyTrend, buildDifficultyProgressionData, buildSlowestProblems } from "../lib/dataProcessor.js";
 import { PeakHoursChart, EfficiencyChart } from "../components/charts/PerformanceCharts.jsx";
 import TopicChart from "../components/charts/TopicChart.jsx";
 import { BentoCard, C, LoadingSpinner, SectionLabel } from "../components/UI.jsx";
@@ -124,6 +124,95 @@ function WeeklyComparison({ problems }) {
   );
 }
 
+function AttemptEfficiencyChart({ problems }) {
+  const data = useMemo(() => buildAttemptEfficiencyTrend(problems), [problems]);
+  return (
+    <BentoCard style={{ padding: 24 }}>
+      <h3 style={{ fontSize: 18, fontWeight: 700, color: "#fff", marginBottom: 4 }}>First-Try Rate Over Time</h3>
+      <p style={{ fontSize: 12, color: C.muted, marginBottom: 20 }}>% of accepted problems solved on the first attempt, by week.</p>
+      {data.length === 0 ? (
+        <p style={{ color: C.muted, fontSize: 13 }}>Not enough data yet.</p>
+      ) : (
+        <ResponsiveContainer width="100%" height={220}>
+          <LineChart data={data}>
+            <XAxis dataKey="week" tick={{ fill: C.muted, fontSize: 11 }} axisLine={false} tickLine={false} />
+            <YAxis domain={[0, 100]} tickFormatter={v => `${v}%`} tick={{ fill: C.muted, fontSize: 11 }} axisLine={false} tickLine={false} width={40} />
+            <Tooltip
+              contentStyle={{ background: "#1c1b1d", border: "1px solid #23232E", borderRadius: 8, fontSize: 12 }}
+              formatter={v => [`${v}%`, "First-try rate"]}
+            />
+            <Line type="monotone" dataKey="rate" stroke={C.blue} strokeWidth={2} dot={{ fill: C.blue, r: 3 }} activeDot={{ r: 5 }} />
+          </LineChart>
+        </ResponsiveContainer>
+      )}
+    </BentoCard>
+  );
+}
+
+function DifficultyProgressionChart({ problems }) {
+  const data = useMemo(() => buildDifficultyProgressionData(problems), [problems]);
+  return (
+    <BentoCard style={{ padding: 24 }}>
+      <h3 style={{ fontSize: 18, fontWeight: 700, color: "#fff", marginBottom: 4 }}>Difficulty Progression</h3>
+      <p style={{ fontSize: 12, color: C.muted, marginBottom: 20 }}>Accepted solves per difficulty each week.</p>
+      {data.length === 0 ? (
+        <p style={{ color: C.muted, fontSize: 13 }}>Not enough data yet.</p>
+      ) : (
+        <ResponsiveContainer width="100%" height={220}>
+          <BarChart data={data}>
+            <XAxis dataKey="week" tick={{ fill: C.muted, fontSize: 11 }} axisLine={false} tickLine={false} />
+            <YAxis allowDecimals={false} tick={{ fill: C.muted, fontSize: 11 }} axisLine={false} tickLine={false} width={30} />
+            <Tooltip
+              contentStyle={{ background: "#1c1b1d", border: "1px solid #23232E", borderRadius: 8, fontSize: 12 }}
+            />
+            <Legend wrapperStyle={{ fontSize: 11, color: C.muted }} />
+            <Bar dataKey="easy"   name="Easy"   stackId="a" fill={C.easy}   radius={[0,0,0,0]} />
+            <Bar dataKey="medium" name="Medium" stackId="a" fill={C.medium} radius={[0,0,0,0]} />
+            <Bar dataKey="hard"   name="Hard"   stackId="a" fill={C.hard}   radius={[4,4,0,0]} />
+          </BarChart>
+        </ResponsiveContainer>
+      )}
+    </BentoCard>
+  );
+}
+
+function SlowestProblems({ problems }) {
+  const data = useMemo(() => buildSlowestProblems(problems), [problems]);
+  const diffColor = { easy: C.easy, medium: C.medium, hard: C.hard };
+  return (
+    <BentoCard style={{ padding: 24 }}>
+      <h3 style={{ fontSize: 18, fontWeight: 700, color: "#fff", marginBottom: 20 }}>Slowest Accepted Solves</h3>
+      {data.length === 0 ? (
+        <p style={{ color: C.muted, fontSize: 13 }}>No accepted solutions yet.</p>
+      ) : (
+        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+          {data.map((p, i) => (
+            <div key={i} style={{ display: "flex", alignItems: "center", gap: 12, padding: "10px 14px", background: C.container, borderRadius: 8, border: "1px solid #23232E" }}>
+              <span style={{ fontSize: 11, fontWeight: 700, color: C.subtle, fontFamily: "monospace", width: 18 }}>{i + 1}</span>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <p style={{ fontSize: 13, fontWeight: 600, color: "#fff", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.name}</p>
+                <p style={{ fontSize: 11, color: C.muted, marginTop: 2 }}>{p.attempts} attempt{p.attempts > 1 ? "s" : ""}</p>
+              </div>
+              <span style={{
+                padding: "2px 8px", borderRadius: 9999, fontSize: 10, fontWeight: 800,
+                textTransform: "uppercase", letterSpacing: "0.05em",
+                color: diffColor[p.difficulty] || C.muted,
+                background: `${diffColor[p.difficulty] || C.muted}18`,
+                border: `1px solid ${diffColor[p.difficulty] || C.muted}30`,
+              }}>
+                {p.difficulty || "?"}
+              </span>
+              <span style={{ fontFamily: "monospace", fontSize: 13, fontWeight: 700, color: C.medium, minWidth: 60, textAlign: "right" }}>
+                {p.mins}m {p.secs}s
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
+    </BentoCard>
+  );
+}
+
 export default function AnalyticsPage() {
   const { user } = useAuth();
   const [problems, setProblems] = useState([]);
@@ -180,6 +269,20 @@ export default function AnalyticsPage() {
           <WeeklyComparison problems={problems} />
         </div>
 
+        {/* Attempt efficiency over time */}
+        <div style={{ gridColumn: "span 6" }}>
+          <AttemptEfficiencyChart problems={problems} />
+        </div>
+
+        {/* Difficulty progression */}
+        <div style={{ gridColumn: "span 6" }}>
+          <DifficultyProgressionChart problems={problems} />
+        </div>
+
+        {/* Slowest problems */}
+        <div style={{ gridColumn: "span 12" }}>
+          <SlowestProblems problems={problems} />
+        </div>
       </div>
     </div>
   );

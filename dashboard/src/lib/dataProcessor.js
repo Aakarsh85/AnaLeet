@@ -240,3 +240,53 @@ export function calcStreak(problems) {
   }
   return streak;
 }
+
+// ─── Week key helper (internal) ───────────────────────────────────────────────
+function getWeekKey(dateStr) {
+  const d = parseISO(dateStr);
+  const diff = d.getDay() === 0 ? -6 : 1 - d.getDay();
+  const monday = new Date(d);
+  monday.setDate(d.getDate() + diff);
+  return format(monday, "MMM d");
+}
+
+/** Weekly first-try rate over time */
+export function buildAttemptEfficiencyTrend(problems) {
+  const weekMap = {};
+  for (const p of problems.filter(p => p.status === "accepted" && p.started_at)) {
+    const key = getWeekKey(p.started_at);
+    if (!weekMap[key]) weekMap[key] = { week: key, total: 0, firstTry: 0 };
+    weekMap[key].total++;
+    if ((p.attempts || 1) === 1) weekMap[key].firstTry++;
+  }
+  return Object.values(weekMap)
+    .map(w => ({ ...w, rate: Math.round((w.firstTry / w.total) * 100) }))
+    .slice(-8);
+}
+
+/** Weekly difficulty breakdown */
+export function buildDifficultyProgressionData(problems) {
+  const weekMap = {};
+  for (const p of problems.filter(p => p.status === "accepted" && p.started_at)) {
+    const key = getWeekKey(p.started_at);
+    if (!weekMap[key]) weekMap[key] = { week: key, easy: 0, medium: 0, hard: 0 };
+    const d = (p.difficulty || "").toLowerCase();
+    if (d in weekMap[key]) weekMap[key][d]++;
+  }
+  return Object.values(weekMap).slice(-8);
+}
+
+/** Top N slowest accepted problems */
+export function buildSlowestProblems(problems, limit = 8) {
+  return problems
+    .filter(p => p.status === "accepted" && (p.time_taken || 0) > 0)
+    .sort((a, b) => b.time_taken - a.time_taken)
+    .slice(0, limit)
+    .map(p => ({
+      name:       p.problem_name,
+      difficulty: p.difficulty,
+      mins:       Math.floor(p.time_taken / 60),
+      secs:       (p.time_taken % 60).toString().padStart(2, "0"),
+      attempts:   p.attempts || 1,
+    }));
+}
