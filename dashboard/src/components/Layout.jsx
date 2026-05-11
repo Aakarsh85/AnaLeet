@@ -38,6 +38,7 @@ const NAV_ITEMS = [
   { to: "/", label: "Dashboard", icon: "dashboard" },
   { to: "/problems", label: "Problems", icon: "list_alt" },
   { to: "/analytics", label: "Analytics", icon: "leaderboard" },
+  { to: "/leaderboard", label: "Leaderboard", icon: "military_tech" },
 ];
 
 function NavItem({ to, label, icon }) {

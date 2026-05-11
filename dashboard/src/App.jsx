@@ -5,6 +5,7 @@ import Layout from "./components/Layout.jsx";
 import DashboardPage from "./pages/DashboardPage.jsx";
 import ProblemsPage from "./pages/ProblemsPage.jsx";
 import AnalyticsPage from "./pages/AnalyticsPage.jsx";
+import LeaderboardPage from "./pages/LeaderboardPage.jsx";
 import LoginPage from "./pages/LoginPage.jsx";
 
 // ─── Auth context ─────────────────────────────────────────────────────────────
@@ -49,6 +50,7 @@ export default function App() {
           <Route path="/" element={<DashboardPage />} />
           <Route path="/problems" element={<ProblemsPage />} />
           <Route path="/analytics" element={<AnalyticsPage />} />
+          <Route path="/leaderboard" element={<LeaderboardPage />} />
         </Route>
       </Routes>
     </AuthContext.Provider>
