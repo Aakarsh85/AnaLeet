@@ -57,6 +57,7 @@ export function buildDifficultyData(problems) {
   const counts = { easy: 0, medium: 0, hard: 0 };
   const times = { easy: 0, medium: 0, hard: 0 };
   for (const p of problems) {
+    if (p.status !== "accepted") continue;
     const d = (p.difficulty || "").toLowerCase();
     if (d in counts) {
       counts[d]++;
@@ -126,13 +127,30 @@ export function buildEfficiencyData(problems) {
   return Object.entries(buckets).map(([name, value]) => ({ name, value }));
 }
 
-/** Session timeline data */
-export function buildSessionData(sessions) {
-  return sessions.slice(0, 10).map((s) => ({
-    date: s.start_time?.slice(0, 10) ?? "",
-    duration: Math.round((s.total_time ?? 0) / 60),
-    problems: s.problems_solved ?? 0,
-  }));
+/**
+ * Session timeline data — groups problems by calendar date.
+ * Each unique date = one "session" entry, so this works regardless
+ * of whether session_id is populated on problem rows.
+ */
+export function buildSessionData(problems) {
+  const dateMap = {};
+
+  for (const p of problems) {
+    const date = p.started_at?.slice(0, 10);
+    if (!date) continue;
+    if (!dateMap[date]) dateMap[date] = { date, totalTime: 0, count: 0 };
+    dateMap[date].totalTime += p.time_taken ?? 0;
+    dateMap[date].count++;
+  }
+
+  return Object.values(dateMap)
+    .sort((a, b) => (a.date < b.date ? 1 : -1))   // newest first
+    .slice(0, 10)
+    .map(({ date, totalTime, count }) => ({
+      date,
+      duration: Math.round(totalTime / 60),
+      problems: count,
+    }));
 }
 
 /** Peak performance hours */

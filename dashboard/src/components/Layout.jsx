@@ -128,21 +128,7 @@ export default function Layout() {
 
       {/* Top header */}
       <header style={css.header}>
-        <div style={{ display: "flex", alignItems: "center", gap: 32 }}>
-          <div style={{ position: "relative" }}>
-            <span className="material-symbols-outlined" style={{ position: "absolute", left: 12, top: "50%", transform: "translateY(-50%)", color: "#6b7280", fontSize: 18 }}>search</span>
-            <input
-              value={search}
-              onChange={e => setSearch(e.target.value)}
-              placeholder="Search problems…"
-              style={{
-                background: "#0e0e10", border: "1px solid #23232E", borderRadius: 9999,
-                paddingLeft: 40, paddingRight: 16, paddingTop: 6, paddingBottom: 6,
-                width: 256, fontSize: 12, color: "#e5e1e4", outline: "none",
-              }}
-            />
-          </div>
-        </div>
+
         <div style={{ display: "flex", alignItems: "center", gap: 16 }}>
           <span style={{ fontSize: 12, color: "#6b7280" }}>
             {new Date().toLocaleDateString("en-US", { weekday: "long", month: "short", day: "numeric" })}

@@ -1,11 +1,11 @@
 import React, { useState, useEffect, useMemo } from "react";
 import { BarChart, Bar, LineChart, Line, XAxis, YAxis, Tooltip, Legend, ResponsiveContainer, Cell, RadarChart, PolarGrid, PolarAngleAxis, Radar } from "recharts";
 import { useAuth } from "../App.jsx";
-import { fetchProblems, fetchSessions, buildHourlyData, buildSessionData, buildTopicData, buildEfficiencyData, buildAttemptEfficiencyTrend, buildDifficultyProgressionData, buildSlowestProblems } from "../lib/dataProcessor.js";
+import { fetchProblems, buildSessionData, buildAttemptEfficiencyTrend, buildDifficultyProgressionData, buildSlowestProblems } from "../lib/dataProcessor.js";
 import { PeakHoursChart, EfficiencyChart } from "../components/charts/PerformanceCharts.jsx";
 import TopicChart from "../components/charts/TopicChart.jsx";
-import { BentoCard, C, LoadingSpinner, SectionLabel } from "../components/UI.jsx";
-import { subDays, format } from "date-fns";
+import { BentoCard, C, LoadingSpinner } from "../components/UI.jsx";
+import { subDays } from "date-fns";
 
 function BurnoutMeter({ problems }) {
   // Risk = % of days with >2h solved in the last 14 days
@@ -50,8 +50,8 @@ function BurnoutMeter({ problems }) {
   );
 }
 
-function SessionTimeline({ sessions }) {
-  const data = useMemo(() => buildSessionData(sessions), [sessions]);
+function SessionTimeline({ problems }) {
+  const data = useMemo(() => buildSessionData(problems), [problems]);
 
   return (
     <BentoCard style={{ padding: 24 }}>
@@ -90,8 +90,11 @@ function WeeklyComparison({ problems }) {
 
   const metrics = [
     { label: "Problems Solved", this: thisWeek.length, last: lastWeek.length },
-    { label: "Avg Time (m)", this: thisWeek.length ? Math.round(thisWeek.reduce((s,p) => s + p.time_taken, 0) / thisWeek.length / 60) : 0,
-      last: lastWeek.length ? Math.round(lastWeek.reduce((s,p) => s + p.time_taken, 0) / lastWeek.length / 60) : 0 },
+    {
+      label: "Avg Time (m)",
+      this: thisWeek.length ? Math.round(thisWeek.reduce((s, p) => s + p.time_taken, 0) / thisWeek.length / 60) : 0,
+      last: lastWeek.length ? Math.round(lastWeek.reduce((s, p) => s + p.time_taken, 0) / lastWeek.length / 60) : 0,
+    },
   ];
 
   return (
@@ -162,13 +165,11 @@ function DifficultyProgressionChart({ problems }) {
           <BarChart data={data}>
             <XAxis dataKey="week" tick={{ fill: C.muted, fontSize: 11 }} axisLine={false} tickLine={false} />
             <YAxis allowDecimals={false} tick={{ fill: C.muted, fontSize: 11 }} axisLine={false} tickLine={false} width={30} />
-            <Tooltip
-              contentStyle={{ background: "#1c1b1d", border: "1px solid #23232E", borderRadius: 8, fontSize: 12 }}
-            />
+            <Tooltip contentStyle={{ background: "#1c1b1d", border: "1px solid #23232E", borderRadius: 8, fontSize: 12 }} />
             <Legend wrapperStyle={{ fontSize: 11, color: C.muted }} />
-            <Bar dataKey="easy"   name="Easy"   stackId="a" fill={C.easy}   radius={[0,0,0,0]} />
-            <Bar dataKey="medium" name="Medium" stackId="a" fill={C.medium} radius={[0,0,0,0]} />
-            <Bar dataKey="hard"   name="Hard"   stackId="a" fill={C.hard}   radius={[4,4,0,0]} />
+            <Bar dataKey="easy"   name="Easy"   stackId="a" fill={C.easy}   radius={[0, 0, 0, 0]} />
+            <Bar dataKey="medium" name="Medium" stackId="a" fill={C.medium} radius={[0, 0, 0, 0]} />
+            <Bar dataKey="hard"   name="Hard"   stackId="a" fill={C.hard}   radius={[4, 4, 0, 0]} />
           </BarChart>
         </ResponsiveContainer>
       )}
@@ -216,15 +217,12 @@ function SlowestProblems({ problems }) {
 export default function AnalyticsPage() {
   const { user } = useAuth();
   const [problems, setProblems] = useState([]);
-  const [sessions, setSessions] = useState([]);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     if (!user) return;
-    Promise.all([
-      fetchProblems({ userId: user.id }),
-      fetchSessions({ userId: user.id }),
-    ]).then(([p, s]) => { setProblems(p); setSessions(s); })
+    fetchProblems({ userId: user.id })
+      .then(setProblems)
       .finally(() => setLoading(false));
   }, [user]);
 
@@ -261,7 +259,7 @@ export default function AnalyticsPage() {
 
         {/* Session timeline */}
         <div style={{ gridColumn: "span 6" }}>
-          <SessionTimeline sessions={sessions} />
+          <SessionTimeline problems={problems} />
         </div>
 
         {/* Weekly comparison */}
@@ -283,6 +281,7 @@ export default function AnalyticsPage() {
         <div style={{ gridColumn: "span 12" }}>
           <SlowestProblems problems={problems} />
         </div>
+
       </div>
     </div>
   );
