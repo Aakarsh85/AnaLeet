@@ -8,9 +8,9 @@
   "use strict";
 
   // ─── Constants ────────────────────────────────────────────────────────────
-  const IDLE_THRESHOLD_MS = 60_000;    // 60 s of no interaction → idle
+  const IDLE_THRESHOLD_MS = 1800_000;    // 1800 s (30 minutes) of no interaction → idle
   const SYNC_INTERVAL_MS = 5 * 60_000; // flush locally every 5 min
-  const MIN_ACTIVE_MS    = 60_000;     // ignore problems opened for less than 1 min
+  const MIN_ACTIVE_MS    = 100_000;     // ignore problems opened for less than 1 min
   const EVENTS = {
     PROBLEM_OPENED: "problem_opened",
     FIRST_INTERACTION: "first_interaction",
@@ -358,7 +358,7 @@
 
   // ─── Periodic local flush ───────────────────────────────────────────────────
   setInterval(() => {
-    if (state.isTracking && isContextValid()) flushToBackground();
+    if (state.isTracking && isContextValid()) flushIfEligible();
   }, SYNC_INTERVAL_MS);
 
   // ─── State reset (called on SPA navigation to a new problem) ───────────────

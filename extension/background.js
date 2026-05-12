@@ -127,7 +127,10 @@ async function syncToSupabase() {
     return;
   }
 
-  const toSync = queue.filter((r) => r.status === "accepted" || r._queued_at);
+  const MIN_TIME_TAKEN_S = 60; // mirror content.js MIN_ACTIVE_MS in seconds
+
+  const toSync = queue.filter((r) =>  r.status === "accepted" ||  (r._queued_at && (r.time_taken ?? 0) >= MIN_TIME_TAKEN_S));
+  // const toSync = queue.filter((r) => r.status === "accepted" || r._queued_at);
   if (!toSync.length) return;
 
   try {
@@ -144,11 +147,18 @@ async function syncToSupabase() {
       ),
     });
 
+    // if (res.ok) {
+    //   // Remove synced items from queue
+    //   const remaining = queue.filter((r) => !toSync.includes(r));
+    //   await setQueue(remaining);
+    //   console.log(`[LeetFlow] Synced ${toSync.length} records`);
+    // } 
     if (res.ok) {
       // Remove synced items from queue
-      const remaining = queue.filter((r) => !toSync.includes(r));
+      const toDrain = queue.filter((r) => r.status !== "accepted" && (r.time_taken ?? 0) < MIN_TIME_TAKEN_S);
+      const remaining = queue.filter((r) => !toSync.includes(r) && !toDrain.includes(r));
       await setQueue(remaining);
-      console.log(`[LeetFlow] Synced ${toSync.length} records`);
+      console.log(`[LeetFlow] Synced ${toSync.length} records, discarded ${toDrain.length} short records`);
     } else {
       console.error("[LeetFlow] Sync failed", await res.text());
     }
