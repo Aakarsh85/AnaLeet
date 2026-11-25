@@ -1,6 +1,7 @@
-import React, { useState } from "react";
+import React from "react";
 import { Outlet, NavLink, useNavigate } from "react-router-dom";
 import { supabase } from "../lib/supabase.js";
+import { ProblemsProvider } from "../lib/useProblems.js";
 import { useAuth } from "../App.jsx";
 
 const css = {
@@ -70,7 +71,6 @@ function NavItem({ to, label, icon }) {
 export default function Layout() {
   const { user } = useAuth();
   const navigate = useNavigate();
-  const [search, setSearch] = useState("");
 
   async function handleSignOut() {
     await supabase.auth.signOut();
@@ -104,7 +104,6 @@ export default function Layout() {
               <p style={{ fontSize: 12, fontWeight: 600, color: "#e5e1e4", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                 {user?.email || "User"}
               </p>
-              <p style={{ fontSize: 10, color: "#6b7280" }}>Pro</p>
             </div>
           </div>
           <a
@@ -136,9 +135,11 @@ export default function Layout() {
         </div>
       </header>
 
-      {/* Page content */}
+      {/* Page content — every page shares one load of the user's problems */}
       <main style={css.main}>
-        <Outlet />
+        <ProblemsProvider>
+          <Outlet />
+        </ProblemsProvider>
       </main>
     </>
   );

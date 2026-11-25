@@ -8,13 +8,18 @@
  * calendar day. Progress is saved to chrome.storage.local, so reloading the
  * page or coming back to the problem later the same day continues the same
  * record instead of starting a new one.
+ *
+ * A problem is identified by its URL slug ("two-sum"), stored as
+ * problem_name; the display title ("1. Two Sum") is stored as problem_title.
  */
 
 (function () {
   "use strict";
 
   // ─── Constants ────────────────────────────────────────────────────────────
-  const IDLE_THRESHOLD_MS   = 1800_000;    // 30 min of no interaction → idle
+  // Time between two moments of activity (input, tab switch) counts as active
+  // only if the gap is shorter than this; a longer gap means the user was away.
+  const IDLE_THRESHOLD_MS   = 1800_000;    // 30 min
   const SYNC_INTERVAL_MS    = 5 * 60_000;  // flush locally every 5 min
   // Problems that were never accepted and have less active time than this are
   // discarded. Keep in sync with MIN_TIME_TAKEN_S in background.js.
@@ -33,18 +38,19 @@
   // ─── State ─────────────────────────────────────────────────────────────────
   function initialState() {
     return {
-      problemName: "",
-      difficulty: "",
+      slug: "",
+      problemTitle: "",
+      difficulty: "unknown",
       tags: [],
       sessionId: "",
       visitKey: "",        // chrome.storage key holding this problem's progress today
       startedAt: null,
       completedAt: null,   // set once, when the accepted verdict arrives
-      activeMs: 0,
+      activeMs: 0,         // confirmed active time (only ever grows)
+      pendingMs: 0,        // visible time since the last activity, not yet confirmed
       attempts: 0,
       status: "in_progress",
       isTracking: false,   // false before init finishes and after the problem is accepted
-      isIdle: false,
       isVisible: document.visibilityState === "visible",
       lastActivityAt: null,
       lastTickAt: null,
@@ -53,7 +59,6 @@
       acceptedSubmissionId: null,
       pendingSubmissionId: null, // bridges submit → check / submitCode → submissionDetails
       tickTimer: null,
-      idleTimer: null,
     };
   }
 
@@ -98,17 +103,17 @@
     return `${y}-${m}-${d}`;
   }
 
-  function scrapeProblemMeta() {
-    // Title from breadcrumb / h4 / document title
-    const titleEl =
-      document.querySelector('[data-cy="question-title"]') ||
-      document.querySelector(".mr-2.text-label-1") ||
-      document.querySelector("h4");
-    const title = titleEl?.textContent?.trim() || parseProblemSlug();
+  // Reads title, difficulty and tags from the page. Any of them can be missing
+  // while the page is still rendering.
+  function scrapeProblemMeta(slug) {
+    // The problem's title is the link to its own URL, e.g.
+    // <a href="/problems/two-sum/">1. Two Sum</a>. Matching on the slug means a
+    // title still on screen from the previous problem is never picked up.
+    const titleEl = document.querySelector(`a[href="/problems/${slug}/"]`);
+    const title = titleEl?.textContent?.trim() || "";
 
-    // Difficulty chip
     const diffEl = document.querySelector(
-      '[diff], .text-difficulty-easy, .text-difficulty-medium, .text-difficulty-hard, [class*="difficulty"]'
+      '.text-difficulty-easy, .text-difficulty-medium, .text-difficulty-hard, [diff], [class*="difficulty"]'
     );
     let difficulty = "unknown";
     if (diffEl) {
@@ -118,16 +123,27 @@
       else if (/hard/i.test(cls)) difficulty = "hard";
     }
 
-    // Tags
-    const tagEls = document.querySelectorAll(
-      'a[href*="/tag/"], [data-cy="topic-tag"]'
-    );
+    const tagEls = document.querySelectorAll('a[href*="/tag/"], [data-cy="topic-tag"]');
     const tags = Array.from(tagEls)
       .map((el) => el.textContent.trim().toLowerCase())
       .filter(Boolean)
       .slice(0, 10);
 
     return { title, difficulty, tags };
+  }
+
+  // Fills in whatever metadata is still missing; never replaces a known value
+  // with an empty one.
+  function refreshMeta() {
+    if (!state.slug) return;
+    const meta = scrapeProblemMeta(state.slug);
+    if (meta.title) state.problemTitle = meta.title;
+    if (meta.difficulty !== "unknown") state.difficulty = meta.difficulty;
+    if (meta.tags.length) state.tags = meta.tags;
+  }
+
+  function isMetaIncomplete() {
+    return !state.problemTitle || state.difficulty === "unknown" || !state.tags.length;
   }
 
   // ─── Saved progress (resume after reload / revisit) ────────────────────────
@@ -148,7 +164,7 @@
       chrome.storage.local
         .set({
           [state.visitKey]: {
-            problemName: state.problemName,
+            problemTitle: state.problemTitle,
             activeMs: state.activeMs,
             attempts: state.attempts,
             status: state.status,
@@ -173,25 +189,41 @@
     } catch (_) {}
   }
 
-  // ─── Active-time ticker ─────────────────────────────────────────────────────
-  function isCounting() {
-    return state.isTracking && !state.isIdle && state.isVisible;
-  }
-
-  // Adds the time since the last tick if the user was actively working.
-  function accumulate() {
+  // ─── Active time ────────────────────────────────────────────────────────────
+  // Visible time accumulates as "pending". At each moment of activity (input,
+  // tab switch, submission, leaving) the pending time is confirmed if the gap
+  // since the previous activity was under IDLE_THRESHOLD_MS, or dropped if the
+  // user was away. Confirmed time only ever grows.
+  function tick() {
     const now = Date.now();
-    if (isCounting() && state.lastTickAt) {
-      state.activeMs += now - state.lastTickAt;
+    if (state.isTracking && state.isVisible && state.lastTickAt) {
+      state.pendingMs += now - state.lastTickAt;
     }
     state.lastTickAt = now;
+  }
+
+  function markActivity() {
+    tick();
+    const now = Date.now();
+    if (state.lastActivityAt !== null && now - state.lastActivityAt < IDLE_THRESHOLD_MS) {
+      state.activeMs += state.pendingMs;
+    }
+    state.pendingMs = 0;
+    state.lastActivityAt = now;
+  }
+
+  // Confirmed time plus pending time that would still count — for live display.
+  function liveActiveMs() {
+    tick();
+    const away = state.lastActivityAt !== null && Date.now() - state.lastActivityAt >= IDLE_THRESHOLD_MS;
+    return state.activeMs + (away ? 0 : state.pendingMs);
   }
 
   function startTick() {
     if (state.tickTimer) return;
     state.lastTickAt = Date.now();
     state.tickTimer = setInterval(() => {
-      accumulate();
+      tick();
       if (state.isTracking && Date.now() - state.lastPersistAt >= PERSIST_INTERVAL_MS) {
         persistVisit();
       }
@@ -203,22 +235,11 @@
     state.tickTimer = null;
   }
 
-  // ─── Idle detection ─────────────────────────────────────────────────────────
-  function resetIdleTimer() {
-    clearTimeout(state.idleTimer);
-    if (state.isIdle) {
-      accumulate(); // moves lastTickAt forward without counting the idle period
-      state.isIdle = false;
-    }
-    state.idleTimer = setTimeout(() => {
-      accumulate();
-      state.isIdle = true;
-    }, IDLE_THRESHOLD_MS);
-  }
-
   // ─── Visibility handling ────────────────────────────────────────────────────
+  // Switching tabs is activity; time while the tab is hidden never counts.
   document.addEventListener("visibilitychange", () => {
-    accumulate(); // count up to the moment the tab was hidden; skip the hidden period
+    if (state.isTracking) markActivity();
+    else tick();
     state.isVisible = document.visibilityState === "visible";
     if (!state.isVisible && state.isTracking) persistVisit();
   });
@@ -226,8 +247,7 @@
   // ─── User interaction listeners ─────────────────────────────────────────────
   function onInteraction() {
     if (!state.isTracking) return;
-    state.lastActivityAt = Date.now();
-    resetIdleTimer();
+    markActivity();
 
     if (!state.hasFirstInteraction) {
       state.hasFirstInteraction = true;
@@ -385,9 +405,8 @@
   function handleAccepted({ submissionId }) {
     if (!state.isTracking || state.status === "accepted") return; // Deduplicate
 
-    accumulate(); // count active time right up to the verdict
+    markActivity(); // confirm active time right up to the verdict
     stopTick();
-    clearTimeout(state.idleTimer);
 
     state.status = "accepted";
     state.completedAt = new Date().toISOString();
@@ -401,8 +420,10 @@
 
   // ─── Data serialization ─────────────────────────────────────────────────────
   function buildRecord(overrides = {}) {
+    if (isMetaIncomplete()) refreshMeta();
     return {
-      problem_name: state.problemName,
+      problem_name: state.slug,
+      problem_title: state.problemTitle || null,
       difficulty: state.difficulty,
       tags: state.tags,
       time_taken: Math.round(state.activeMs / 1000), // seconds
@@ -428,10 +449,7 @@
 
   function flushToBackground({ final = false, status } = {}) {
     if (!isContextValid()) return;
-    if (state.isTracking) {
-      accumulate();
-      persistVisit();
-    }
+    if (state.isTracking) persistVisit();
     try {
       chrome.runtime.sendMessage({
         type: "LEETFLOW_FLUSH",
@@ -448,7 +466,7 @@
   // records for problems merely glanced at.
   function flushIfEligible({ final = false } = {}) {
     if (final && state.status !== "accepted") {
-      accumulate();
+      markActivity(); // leaving the page is activity too
       if (state.activeMs < MIN_ACTIVE_MS) {
         persistVisit(); // keep the time in case the user comes back today
         return; // Too short — discard silently
@@ -470,7 +488,6 @@
   function endVisit() {
     if (state.isTracking) flushIfEligible({ final: true });
     stopTick();
-    clearTimeout(state.idleTimer);
     initToken++; // cancels an init that is still loading saved progress
     state = initialState();
   }
@@ -483,17 +500,13 @@
     const saved = await loadVisit(visitKey);
     if (token !== initToken) return; // user navigated away while loading
 
-    const { title, difficulty, tags } = scrapeProblemMeta();
-
-    // If the title hasn't rendered yet (scrape fell back to the slug), reuse
-    // the name saved earlier today so the record keeps the same identity.
-    state.problemName = title === slug && saved?.problemName ? saved.problemName : title;
-    state.difficulty = difficulty;
-    state.tags = tags;
+    state.slug = slug;
     // One record per problem per local day: matches the database's unique key
     // (user_id, problem_name, session_id).
     state.sessionId = `session_${day}`;
     state.visitKey = visitKey;
+    state.problemTitle = saved?.problemTitle || "";
+    refreshMeta();
 
     if (saved) {
       state.activeMs = saved.activeMs ?? 0;
@@ -509,19 +522,14 @@
     if (state.status === "accepted") return;
 
     state.isTracking = true;
+    state.lastActivityAt = Date.now(); // opening the problem counts as activity
     sendEvent(EVENTS.PROBLEM_OPENED);
     startTick();
-    resetIdleTimer();
     watchRunButton();
 
-    // Re-scrape after hydration (React pages may load late, and after SPA
-    // navigation the previous problem's title can still be on screen).
+    // Re-scrape after hydration (React pages may load late)
     setTimeout(() => {
-      if (token !== initToken) return;
-      const updated = scrapeProblemMeta();
-      if (updated.title !== slug) state.problemName = updated.title;
-      if (updated.difficulty !== "unknown") state.difficulty = updated.difficulty;
-      if (updated.tags.length) state.tags = updated.tags;
+      if (token === initToken) refreshMeta();
     }, 3000);
   }
 
@@ -583,17 +591,16 @@
   try {
     chrome.runtime.onMessage.addListener((msg, _sender, respond) => {
       if (msg.type === "GET_CURRENT_SESSION") {
-        accumulate();
         respond({
-          activeMs: state.activeMs,
-          problemName: state.problemName,
+          activeMs: liveActiveMs(),
+          problemName: state.slug,
+          problemTitle: state.problemTitle,
           difficulty: state.difficulty,
           isTracking: state.isTracking,
           attempts: state.attempts,
           status: state.status,
         });
       }
-      return true;
     });
   } catch (_) {
     // Context already invalidated at registration time — nothing to do

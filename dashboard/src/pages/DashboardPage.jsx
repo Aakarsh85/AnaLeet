@@ -1,10 +1,13 @@
-import React, { useState, useEffect, useMemo } from "react";
-import { useAuth } from "../App.jsx";
-import { fetchProblems } from "../lib/dataProcessor.js";
-import { buildDifficultyData, calcStreak, generateInsights, effectiveStatus, localDateKey } from "../lib/dataProcessor.js";
+import React, { useMemo } from "react";
+import { Link } from "react-router-dom";
+import { useProblems } from "../lib/useProblems.js";
+import {
+  buildDifficultyData, calcStreak, generateInsights, effectiveStatus, localDateKey,
+  problemTitle, solvedProblems,
+} from "../lib/dataProcessor.js";
 import ActivityHeatmap from "../components/charts/ActivityHeatmap.jsx";
 import TimeTrendChart from "../components/charts/TimeTrendChart.jsx";
-import { BentoCard, StatCard, InsightCard, DiffBadge, STATUS_META, C, LoadingSpinner } from "../components/UI.jsx";
+import { BentoCard, StatCard, InsightCard, DiffBadge, ErrorBanner, STATUS_META, C, LoadingSpinner } from "../components/UI.jsx";
 
 function RecentSolves({ problems }) {
   const recent = problems.slice(0, 6);
@@ -13,7 +16,7 @@ function RecentSolves({ problems }) {
       <h3 style={{ fontSize: 18, fontWeight: 700, color: "#fff", marginBottom: 20 }}>Recent Solves</h3>
       <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
         {recent.length === 0 && <p style={{ color: C.muted, fontSize: 13 }}>No solves recorded yet.</p>}
-        {recent.map((p, i) => {
+        {recent.map((p) => {
           const status = STATUS_META[effectiveStatus(p)];
           const mins = Math.floor((p.time_taken || 0) / 60);
           const secs = ((p.time_taken || 0) % 60).toString().padStart(2, "0");
@@ -21,14 +24,14 @@ function RecentSolves({ problems }) {
             ? Math.round((Date.now() - new Date(p.started_at)) / 3_600_000)
             : 0;
           return (
-            <div key={i} style={{ padding: 12, background: C.container, borderRadius: 8, border: "1px solid #23232E", transition: "border-color 0.15s", cursor: "default" }}
+            <div key={p.id} style={{ padding: 12, background: C.container, borderRadius: 8, border: "1px solid #23232E", transition: "border-color 0.15s", cursor: "default" }}
               onMouseEnter={e => e.currentTarget.style.borderColor = "rgba(0,112,255,0.4)"}
               onMouseLeave={e => e.currentTarget.style.borderColor = "#23232E"}>
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "start", marginBottom: 6 }}>
                 <DiffBadge diff={p.difficulty} />
                 <span style={{ fontSize: 10, color: C.subtle }}>{timeAgo}h ago</span>
               </div>
-              <p style={{ fontSize: 13, fontWeight: 700, color: "#fff", marginBottom: 6 }}>{p.problem_name}</p>
+              <p style={{ fontSize: 13, fontWeight: 700, color: "#fff", marginBottom: 6 }}>{problemTitle(p)}</p>
               <div style={{ display: "flex", alignItems: "center", gap: 12, fontSize: 11, color: C.muted }}>
                 <span style={{ display: "flex", alignItems: "center", gap: 4 }}>
                   <span className="material-symbols-outlined" style={{ fontSize: 14 }}>timer</span>
@@ -45,33 +48,34 @@ function RecentSolves({ problems }) {
         })}
       </div>
       {recent.length > 0 && (
-        <button style={{ width: "100%", marginTop: 16, padding: "8px", fontSize: 12, fontWeight: 700, color: C.blue, background: "transparent", border: "1px solid rgba(0,112,255,0.15)", borderRadius: 8, cursor: "pointer", transition: "background 0.15s" }}
+        <Link to="/problems" style={{ display: "block", textAlign: "center", textDecoration: "none", width: "100%", marginTop: 16, padding: "8px", fontSize: 12, fontWeight: 700, color: C.blue, background: "transparent", border: "1px solid rgba(0,112,255,0.15)", borderRadius: 8, cursor: "pointer", transition: "background 0.15s" }}
           onMouseEnter={e => e.currentTarget.style.background = "rgba(0,112,255,0.05)"}
           onMouseLeave={e => e.currentTarget.style.background = "transparent"}>
           View All Solves →
-        </button>
+        </Link>
       )}
     </BentoCard>
   );
 }
 
+// Share of your solved problems by difficulty
 function DifficultyDistribution({ problems }) {
   const data = useMemo(() => buildDifficultyData(problems), [problems]);
   const totalSolved = data.reduce((s, d) => s + d.count, 0);
-  const totals = { easy: 873, medium: 1652, hard: 836 }; // LeetCode totals (approx)
 
   return (
     <BentoCard style={{ padding: 24 }}>
       <h3 style={{ fontSize: 18, fontWeight: 700, color: "#fff", marginBottom: 24 }}>Distribution</h3>
       <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
         {data.map((d) => {
-          const total = totals[d.name.toLowerCase()] || 1;
-          const pct = Math.round((d.count / total) * 100);
+          const pct = totalSolved ? Math.round((d.count / totalSolved) * 100) : 0;
           return (
             <div key={d.name}>
               <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 8 }}>
                 <span style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: C.muted }}>{d.name}</span>
-                <span style={{ fontSize: 13, fontWeight: 700, color: "#fff" }}>{d.count} / {total}</span>
+                <span style={{ fontSize: 13, fontWeight: 700, color: "#fff" }}>
+                  {d.count} <span style={{ fontSize: 11, fontWeight: 500, color: C.muted }}>({pct}%)</span>
+                </span>
               </div>
               <div style={{ height: 6, background: C.container, borderRadius: 9999, overflow: "hidden" }}>
                 <div style={{ height: "100%", width: `${pct}%`, background: d.color, borderRadius: 9999, boxShadow: `0 0 8px ${d.color}60`, transition: "width 0.6s ease" }} />
@@ -85,18 +89,7 @@ function DifficultyDistribution({ problems }) {
 }
 
 export default function DashboardPage() {
-  const { user } = useAuth();
-  const [problems, setProblems] = useState([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState(null);
-
-  useEffect(() => {
-    if (!user) return;
-    fetchProblems({ userId: user.id })
-      .then(setProblems)
-      .catch(e => setError(e.message))
-      .finally(() => setLoading(false));
-  }, [user]);
+  const { problems, loading, error, refetch } = useProblems();
 
   const stats = useMemo(() => {
     const accepted = problems.filter(p => p.status === "accepted");
@@ -107,7 +100,7 @@ export default function DashboardPage() {
     const insights = generateInsights(problems);
     const today = localDateKey(new Date());
     const todayCount = accepted.filter(p => localDateKey(p.started_at) === today).length;
-    return { total: accepted.length, avgTime, streak, insights, todayCount };
+    return { total: solvedProblems(problems).length, avgTime, streak, insights, todayCount };
   }, [problems]);
 
   if (loading) return <LoadingSpinner />;
@@ -120,18 +113,14 @@ export default function DashboardPage() {
         <p style={{ fontSize: 14, color: C.muted, marginTop: 4 }}>Real-time performance metrics and cognitive trends.</p>
       </div>
 
-      {error && (
-        <div style={{ padding: "12px 16px", background: "rgba(147,0,10,0.2)", border: "1px solid rgba(147,0,10,0.4)", borderRadius: 8, color: "#ffb4ab", fontSize: 13, marginBottom: 24 }}>
-          Error loading data: {error}
-        </div>
-      )}
+      <ErrorBanner message={error} onRetry={refetch} />
 
       {/* Bento Grid */}
       <div style={{ display: "grid", gridTemplateColumns: "repeat(12, 1fr)", gap: 24 }}>
 
         {/* Summary cards */}
         <div style={{ gridColumn: "span 4" }}>
-          <StatCard icon="check_circle" label="Total Solved" value={stats.total} sub="Accepted solutions" accent={C.blue}>
+          <StatCard icon="check_circle" label="Total Solved" value={stats.total} sub={`Distinct problems · ${stats.todayCount} today`} accent={C.blue}>
             <div style={{ marginTop: 16, height: 4, background: C.container, borderRadius: 9999, overflow: "hidden" }}>
               <div style={{ height: "100%", width: `${Math.min(100, (stats.total / 500) * 100)}%`, background: C.blue, boxShadow: `0 0 8px ${C.blue}80` }} />
             </div>

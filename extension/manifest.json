@@ -1,13 +1,12 @@
 {
   "manifest_version": 3,
   "name": "LeetFlow — Performance Analytics",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Silently tracks your LeetCode problem-solving performance and syncs to your analytics dashboard.",
   "permissions": [
     "storage",
     "alarms",
-    "tabs",
-    "scripting"
+    "tabs"
   ],
   "host_permissions": [
     "https://leetcode.com/*",
@@ -33,7 +32,7 @@
     {
       "matches": ["https://ana-leet.vercel.app/*"],
       "js": ["auth-bridge.js"],
-      "run_at": "document_idle"
+      "run_at": "document_start"
     }
   ],
   "action": {

@@ -360,7 +360,7 @@ button {
   white-space: nowrap;
 }
 
-/* Difficulty badge — colors applied by JS */
+/* Difficulty badge — modifier class (easy / medium / hard / unknown) set by JS */
 .difficulty-badge {
   padding: 2px 8px;
   border-radius: 9999px;
@@ -370,6 +370,27 @@ button {
   letter-spacing: -0.05em;
   border: 1px solid;
   flex-shrink: 0;
+  color: var(--color-gray-400);
+  background: rgba(107, 114, 128, 0.1);
+  border-color: rgba(107, 114, 128, 0.2);
+}
+
+.difficulty-badge.easy {
+  color: #34d399;
+  background: rgba(16, 185, 129, 0.1);
+  border-color: rgba(16, 185, 129, 0.2);
+}
+
+.difficulty-badge.medium {
+  color: #fbbf24;
+  background: rgba(245, 158, 11, 0.1);
+  border-color: rgba(245, 158, 11, 0.2);
+}
+
+.difficulty-badge.hard {
+  color: #fb7185;
+  background: rgba(244, 63, 94, 0.1);
+  border-color: rgba(244, 63, 94, 0.2);
 }
 
 /* Status icon circle */
@@ -386,6 +407,15 @@ button {
 .status-icon-symbol {
   font-size: 14px;
   color: var(--color-gray-400);
+}
+
+.status-icon-symbol.accepted {
+  color: #34d399;
+  font-variation-settings: 'FILL' 1;
+}
+
+.status-icon-symbol.attempted {
+  color: #fbbf24;
 }
 
 /* ============================================================
@@ -574,6 +604,18 @@ button {
   color: #ffffff;
 }
 
+.sync-btn:disabled {
+  cursor: default;
+}
+
+.sync-btn.syncing .material-symbols-outlined {
+  animation: lf-spin 0.8s linear infinite;
+}
+
+@keyframes lf-spin {
+  to { transform: rotate(360deg); }
+}
+
 /* ============================================================
    Settings Panel
    ============================================================ */
@@ -624,6 +666,15 @@ button {
 .auth-status {
   font-size: 14px;
   color: var(--color-gray-400);
+}
+
+.auth-status.signed-in {
+  color: #34d399;
+}
+
+.auth-status a {
+  color: var(--color-primary);
+  text-decoration: underline;
 }
 
 .save-btn {

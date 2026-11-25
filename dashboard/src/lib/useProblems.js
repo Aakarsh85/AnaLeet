@@ -1,37 +1,65 @@
-import { useState, useEffect, useCallback } from "react";
+import { createContext, createElement, useCallback, useContext, useEffect, useRef, useState } from "react";
 import { useAuth } from "../App.jsx";
-import { fetchProblems, fetchSessions } from "./dataProcessor.js";
+import { fetchProblems } from "./dataProcessor.js";
+
+const ProblemsContext = createContext(null);
+
+// When the tab becomes visible again, refetch if the data is older than this,
+// so solves synced by the extension in the meantime show up without a reload.
+const REFRESH_AFTER_MS = 60_000;
 
 /**
- * Central data hook — fetches problems + sessions once and provides
- * a refresh callback. Consumed by Dashboard, Problems, and Analytics pages.
+ * Loads the signed-in user's problems once and shares them with every page
+ * (Layout wraps the routes in this provider).
  */
-export function useProblems({ dateFrom, dateTo } = {}) {
+export function ProblemsProvider({ children }) {
   const { user } = useAuth();
   const [problems, setProblems] = useState([]);
-  const [sessions, setSessions] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
+  const lastLoadedAt = useRef(0);
+  const latestRequest = useRef(0);
 
-  const load = useCallback(async () => {
+  const load = useCallback(async ({ background = false } = {}) => {
     if (!user) return;
-    setLoading(true);
-    setError(null);
+    const request = ++latestRequest.current;
+    if (!background) setLoading(true);
     try {
-      const [p, s] = await Promise.all([
-        fetchProblems({ userId: user.id, from: dateFrom, to: dateTo }),
-        fetchSessions({ userId: user.id }),
-      ]);
-      setProblems(p);
-      setSessions(s);
+      const rows = await fetchProblems({ userId: user.id });
+      if (request !== latestRequest.current) return; // a newer load started
+      setProblems(rows);
+      setError(null);
+      lastLoadedAt.current = Date.now();
     } catch (err) {
-      setError(err.message);
+      if (request !== latestRequest.current) return;
+      setError(err?.message || String(err));
     } finally {
-      setLoading(false);
+      if (request === latestRequest.current) setLoading(false);
     }
-  }, [user, dateFrom, dateTo]);
+  }, [user]);
 
-  useEffect(() => { load(); }, [load]);
+  useEffect(() => {
+    setProblems([]);
+    load();
+  }, [load]);
 
-  return { problems, sessions, loading, error, refetch: load };
+  useEffect(() => {
+    function onVisibilityChange() {
+      if (document.visibilityState === "visible" && Date.now() - lastLoadedAt.current > REFRESH_AFTER_MS) {
+        load({ background: true });
+      }
+    }
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    return () => document.removeEventListener("visibilitychange", onVisibilityChange);
+  }, [load]);
+
+  const value = { problems, loading, error, refetch: load };
+  return createElement(ProblemsContext.Provider, { value }, children);
+}
+
+/** { problems, loading, error, refetch } for the signed-in user. */
+export function useProblems() {
+  const ctx = useContext(ProblemsContext);
+  if (!ctx) throw new Error("useProblems must be used inside <ProblemsProvider>");
+  return ctx;
 }

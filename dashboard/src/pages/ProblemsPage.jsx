@@ -1,26 +1,58 @@
 import React, { useState, useEffect, useMemo } from "react";
 import { useAuth } from "../App.jsx";
-import { fetchProblems, generateInsights, buildTopicData, effectiveStatus } from "../lib/dataProcessor.js";
-import { BentoCard, DiffBadge, InsightCard, StatusBadge, C, LoadingSpinner } from "../components/UI.jsx";
+import { useProblems } from "../lib/useProblems.js";
+import {
+  generateInsights, buildTopicData, effectiveStatus, problemTitle, problemUrl, problemsToCsv,
+} from "../lib/dataProcessor.js";
+import { fetchBookmarks, addBookmark, removeBookmark } from "../lib/bookmarks.js";
+import { BentoCard, DiffBadge, InsightCard, StatusBadge, ErrorBanner, C, LoadingSpinner } from "../components/UI.jsx";
 
 const PAGE_SIZE = 15;
 
+function downloadCsv(rows) {
+  const blob = new Blob([problemsToCsv(rows)], { type: "text/csv;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `leetflow-problems-${new Date().toISOString().slice(0, 10)}.csv`;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
 export default function ProblemsPage() {
   const { user } = useAuth();
-  const [problems, setProblems] = useState([]);
-  const [loading, setLoading] = useState(true);
+  const { problems, loading, error, refetch } = useProblems();
+  const [bookmarks, setBookmarks] = useState(() => new Set());
+  const [bookmarkError, setBookmarkError] = useState(null);
   const [search, setSearch] = useState("");
   const [diffFilter, setDiffFilter] = useState("all");
   const [tagFilter, setTagFilter] = useState("");
   const [statusFilter, setStatusFilter] = useState("all");
+  const [bookmarkedOnly, setBookmarkedOnly] = useState(false);
   const [page, setPage] = useState(0);
 
   useEffect(() => {
     if (!user) return;
-    fetchProblems({ userId: user.id })
-      .then(setProblems)
-      .finally(() => setLoading(false));
+    fetchBookmarks(user.id)
+      .then((rows) => setBookmarks(new Set(rows.map((b) => b.problem_name))))
+      .catch((e) => setBookmarkError(e.message));
   }, [user]);
+
+  async function toggleBookmark(p) {
+    const name = p.problem_name;
+    const wasBookmarked = bookmarks.has(name);
+    const next = new Set(bookmarks);
+    if (wasBookmarked) next.delete(name); else next.add(name);
+    setBookmarks(next); // optimistic
+    try {
+      if (wasBookmarked) await removeBookmark({ userId: user.id, problemName: name });
+      else await addBookmark({ userId: user.id, problemName: name, difficulty: p.difficulty, tags: p.tags || [] });
+      setBookmarkError(null);
+    } catch (e) {
+      setBookmarks(bookmarks); // revert
+      setBookmarkError(e.message);
+    }
+  }
 
   const allTags = useMemo(() => {
     const set = new Set();
@@ -29,14 +61,16 @@ export default function ProblemsPage() {
   }, [problems]);
 
   const filtered = useMemo(() => {
+    const term = search.toLowerCase();
     return problems.filter(p => {
-      if (search && !p.problem_name?.toLowerCase().includes(search.toLowerCase())) return false;
+      if (term && !problemTitle(p).toLowerCase().includes(term) && !p.problem_name?.includes(term)) return false;
       if (diffFilter !== "all" && p.difficulty?.toLowerCase() !== diffFilter) return false;
       if (tagFilter && !(p.tags || []).includes(tagFilter)) return false;
       if (statusFilter !== "all" && effectiveStatus(p) !== statusFilter) return false;
+      if (bookmarkedOnly && !bookmarks.has(p.problem_name)) return false;
       return true;
     });
-  }, [problems, search, diffFilter, tagFilter, statusFilter]);
+  }, [problems, search, diffFilter, tagFilter, statusFilter, bookmarkedOnly, bookmarks]);
 
   const insights = useMemo(() => generateInsights(problems), [problems]);
   const topicData = useMemo(() => buildTopicData(problems), [problems]);
@@ -46,6 +80,13 @@ export default function ProblemsPage() {
 
   if (loading) return <LoadingSpinner />;
 
+  const chip = (active) => ({
+    padding: "4px 10px", borderRadius: 9999, fontSize: 11, fontWeight: 700, cursor: "pointer", border: "1px solid", transition: "all 0.15s",
+    background: active ? "rgba(0,112,255,0.2)" : "#23232E",
+    color: active ? C.blue : "#6b7280",
+    borderColor: active ? "rgba(0,112,255,0.3)" : "transparent",
+  });
+
   return (
     <div style={{ maxWidth: 1440, margin: "0 auto" }}>
       {/* Header */}
@@ -53,14 +94,21 @@ export default function ProblemsPage() {
         <div>
           <h2 style={{ fontSize: 28, fontWeight: 900, letterSpacing: "-0.02em", color: "#fff" }}>Problem History</h2>
           <p style={{ fontSize: 14, color: C.muted, marginTop: 4 }}>
-            <span style={{ color: C.blue, fontWeight: 700 }}>{problems.filter(p => p.status === "accepted").length}</span> accepted of {problems.length} tracked
+            <span style={{ color: C.blue, fontWeight: 700 }}>{problems.filter(p => p.status === "accepted").length}</span> accepted of {problems.length} tracked (one row per problem per day)
           </p>
         </div>
-        <button style={{ padding: "8px 16px", background: "#1c1b1d", border: "1px solid #23232E", borderRadius: 8, color: C.muted, fontSize: 13, fontWeight: 600, cursor: "pointer", display: "flex", alignItems: "center", gap: 8 }}>
+        <button
+          onClick={() => downloadCsv(filtered)}
+          disabled={filtered.length === 0}
+          title="Download the rows matching the current filters"
+          style={{ padding: "8px 16px", background: "#1c1b1d", border: "1px solid #23232E", borderRadius: 8, color: C.muted, fontSize: 13, fontWeight: 600, cursor: filtered.length ? "pointer" : "not-allowed", display: "flex", alignItems: "center", gap: 8, opacity: filtered.length ? 1 : 0.5 }}>
           <span className="material-symbols-outlined" style={{ fontSize: 16 }}>download</span>
           Export CSV
         </button>
       </div>
+
+      <ErrorBanner message={error} onRetry={refetch} />
+      {bookmarkError && <ErrorBanner message={`Bookmarks: ${bookmarkError}`} />}
 
       <div style={{ display: "grid", gridTemplateColumns: "1fr 320px", gap: 24 }}>
         {/* Left: Filters + Table */}
@@ -96,13 +144,12 @@ export default function ProblemsPage() {
             </select>
 
             <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+              <button onClick={() => { setBookmarkedOnly(!bookmarkedOnly); setPage(0); }} style={{ ...chip(bookmarkedOnly), display: "flex", alignItems: "center", gap: 4 }}>
+                <span className="material-symbols-outlined" style={{ fontSize: 13, fontVariationSettings: "'FILL' 1" }}>bookmark</span>
+                Bookmarked
+              </button>
               {allTags.slice(0, 5).map(tag => (
-                <button key={tag} onClick={() => { setTagFilter(tagFilter === tag ? "" : tag); setPage(0); }}
-                  style={{ padding: "4px 10px", borderRadius: 9999, fontSize: 11, fontWeight: 700, cursor: "pointer", border: "1px solid", transition: "all 0.15s",
-                    background: tagFilter === tag ? "rgba(0,112,255,0.2)" : "#23232E",
-                    color: tagFilter === tag ? C.blue : "#6b7280",
-                    borderColor: tagFilter === tag ? "rgba(0,112,255,0.3)" : "transparent",
-                  }}>
+                <button key={tag} onClick={() => { setTagFilter(tagFilter === tag ? "" : tag); setPage(0); }} style={chip(tagFilter === tag)}>
                   {tag}
                 </button>
               ))}
@@ -114,26 +161,31 @@ export default function ProblemsPage() {
             <table style={{ width: "100%", borderCollapse: "collapse" }}>
               <thead>
                 <tr style={{ background: "rgba(42,42,44,0.5)", borderBottom: "1px solid #23232E" }}>
-                  {["Problem Name","Difficulty","Tags","Time Taken","Attempts","Status"].map(h => (
-                    <th key={h} style={{ padding: "14px 16px", textAlign: "left", fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: "#6b7280", whiteSpace: "nowrap" }}>{h}</th>
+                  {["Problem Name","Difficulty","Tags","Time Taken","Attempts","Status",""].map((h, i) => (
+                    <th key={i} style={{ padding: "14px 16px", textAlign: "left", fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: "#6b7280", whiteSpace: "nowrap" }}>{h}</th>
                   ))}
                 </tr>
               </thead>
               <tbody>
                 {paginated.length === 0 && (
-                  <tr><td colSpan={6} style={{ textAlign: "center", padding: 40, color: C.muted, fontSize: 13 }}>No problems match your filters.</td></tr>
+                  <tr><td colSpan={7} style={{ textAlign: "center", padding: 40, color: C.muted, fontSize: 13 }}>No problems match your filters.</td></tr>
                 )}
-                {paginated.map((p, i) => {
+                {paginated.map((p) => {
                   const mins = Math.floor((p.time_taken || 0) / 60);
                   const secs = ((p.time_taken || 0) % 60).toString().padStart(2, "0");
+                  const isBookmarked = bookmarks.has(p.problem_name);
                   return (
-                    <tr key={i} style={{ borderBottom: "1px solid #23232E", transition: "background 0.1s" }}
+                    <tr key={p.id} style={{ borderBottom: "1px solid #23232E", transition: "background 0.1s" }}
                       onMouseEnter={e => e.currentTarget.style.background = "rgba(42,42,44,0.3)"}
                       onMouseLeave={e => e.currentTarget.style.background = "transparent"}>
                       <td style={{ padding: "14px 16px" }}>
                         <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
                           <span style={{ color: "#6b7280", fontFamily: "monospace", fontSize: 11 }}>#</span>
-                          <span style={{ fontSize: 14, fontWeight: 500, color: "#fff" }}>{p.problem_name}</span>
+                          <a href={problemUrl(p)} target="_blank" rel="noreferrer" style={{ fontSize: 14, fontWeight: 500, color: "#fff", textDecoration: "none" }}
+                            onMouseEnter={e => e.currentTarget.style.color = C.blue}
+                            onMouseLeave={e => e.currentTarget.style.color = "#fff"}>
+                            {problemTitle(p)}
+                          </a>
                         </div>
                       </td>
                       <td style={{ padding: "14px 16px" }}><DiffBadge diff={p.difficulty} /></td>
@@ -145,9 +197,15 @@ export default function ProblemsPage() {
                         </div>
                       </td>
                       <td style={{ padding: "14px 16px", fontFamily: "monospace", fontSize: 12, color: "#8c90a1" }}>{mins}m {secs}s</td>
-                      <td style={{ padding: "14px 16px", fontSize: 13, color: "#8c90a1", textAlign: "center" }}>{p.attempts || 1}</td>
+                      <td style={{ padding: "14px 16px", fontSize: 13, color: "#8c90a1", textAlign: "center" }}>{p.attempts ?? 0}</td>
                       <td style={{ padding: "14px 16px" }}>
                         <StatusBadge status={effectiveStatus(p)} />
+                      </td>
+                      <td style={{ padding: "14px 8px" }}>
+                        <button onClick={() => toggleBookmark(p)} title={isBookmarked ? "Remove bookmark" : "Bookmark for retry"}
+                          style={{ background: "transparent", border: "none", cursor: "pointer", color: isBookmarked ? C.medium : "#424655", display: "flex" }}>
+                          <span className="material-symbols-outlined" style={{ fontSize: 18, fontVariationSettings: isBookmarked ? "'FILL' 1" : "'FILL' 0" }}>bookmark</span>
+                        </button>
                       </td>
                     </tr>
                   );

@@ -1,29 +1,26 @@
 import { createClient } from "@supabase/supabase-js";
 
-// ─── Replace with your Supabase project credentials ───────────────────────────
-const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL || "https://YOUR_PROJECT_ID.supabase.co";
-const SUPABASE_ANON_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY || "YOUR_SUPABASE_ANON_KEY";
+// Set in dashboard/.env (see .env.example). `?? {}` lets this module load
+// outside Vite (e.g. under node's test runner).
+const env = import.meta.env ?? {};
+const SUPABASE_URL = env.VITE_SUPABASE_URL;
+const SUPABASE_ANON_KEY = env.VITE_SUPABASE_ANON_KEY;
 
-export const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
-  auth: {
-    autoRefreshToken: true,
-    persistSession: true,
-    detectSessionInUrl: true,
-  },
-});
-
-export async function getUser() {
-  const { data } = await supabase.auth.getUser();
-  return data?.user ?? null;
+if (!SUPABASE_URL || !SUPABASE_ANON_KEY) {
+  console.error(
+    "[LeetFlow] VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY must be set (dashboard/.env locally, " +
+    "or the host's environment variables when deployed)."
+  );
 }
 
-export async function signInWithGoogle() {
-  return supabase.auth.signInWithOAuth({
-    provider: "google",
-    options: { redirectTo: window.location.origin },
-  });
-}
-
-export async function signOut() {
-  return supabase.auth.signOut();
-}
+export const supabase = createClient(
+  SUPABASE_URL || "https://missing-config.supabase.co",
+  SUPABASE_ANON_KEY || "missing-config",
+  {
+    auth: {
+      autoRefreshToken: true,
+      persistSession: true,
+      detectSessionInUrl: true,
+    },
+  }
+);

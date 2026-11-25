@@ -1,13 +1,16 @@
 /**
  * LeetFlow Background Service Worker
- * Handles local storage, deduplication, and Supabase sync.
+ * Handles local storage, deduplication, auth session, and Supabase sync.
  */
 
-import { SUPABASE_URL, SUPABASE_ANON_KEY } from "./config.js";
+import { SUPABASE_URL, SUPABASE_ANON_KEY, DASHBOARD_URL } from "./config.js";
 
 // Records that were never accepted need at least this much active time to be
 // synced. Keep in sync with MIN_ACTIVE_MS in content.js.
 const MIN_TIME_TAKEN_S = 100;
+
+const EXPECTED_TOKEN_ISSUER = `${SUPABASE_URL}/auth/v1`;
+const DASHBOARD_ORIGIN = new URL(DASHBOARD_URL).origin;
 
 // ─── Storage helpers ──────────────────────────────────────────────────────────
 async function getQueue() {
@@ -30,6 +33,11 @@ async function setStats(stats) {
   await chrome.storage.local.set({ stats });
 }
 
+async function getStoredSession() {
+  const { session } = await chrome.storage.local.get({ session: null });
+  return session;
+}
+
 // Runs async read-modify-write operations one at a time. Without this, two
 // overlapping operations can read the same stored value and the second write
 // silently discards the first one's changes.
@@ -44,6 +52,7 @@ function createMutex() {
 
 const withQueueLock = createMutex();
 const withStatsLock = createMutex();
+const withSessionLock = createMutex();
 
 // YYYY-MM-DD in the user's local time zone
 function localDateKey(date = new Date()) {
@@ -60,9 +69,9 @@ function yesterdayKey() {
 }
 
 // ─── Record identity ──────────────────────────────────────────────────────────
-// Mirrors the database's unique key (user_id, problem_name, session_id). The
-// content script uses one session_id per local day, so solving the same problem
-// several times in one day merges into a single record.
+// Mirrors the database's unique key (user_id, problem_name, session_id).
+// problem_name is the problem's URL slug and session_id is the local day, so
+// solving the same problem several times in one day is a single record.
 function recordKey(record) {
   return `${record.problem_name}__${record.session_id}`;
 }
@@ -90,6 +99,7 @@ function mergeRecords(prev, next) {
     status: accepted ? "accepted" : next.status,
     started_at: earliest(prev.started_at, next.started_at),
     completed_at: accepted ? prev.completed_at ?? next.completed_at ?? null : null,
+    problem_title: next.problem_title || prev.problem_title || null,
     difficulty:
       next.difficulty && next.difficulty !== "unknown" ? next.difficulty : prev.difficulty,
     tags: next.tags?.length ? next.tags : prev.tags,
@@ -116,59 +126,121 @@ function enqueue(record) {
   });
 }
 
-// ─── Token refresh ────────────────────────────────────────────────────────────
-// Silently refreshes the Supabase session using the stored refresh_token and
-// writes the new session back to storage.
-async function refreshSession() {
-  const { session } = await chrome.storage.local.get({ session: null });
-  const refreshToken = session?.refresh_token ?? null;
-  if (!refreshToken) return null;
+// ─── Auth session ─────────────────────────────────────────────────────────────
+// The session comes from the dashboard (via auth-bridge.js). Both the
+// dashboard and the extension may refresh it, and every refresh rotates the
+// refresh token, so the newest session must win on both sides.
 
+function tokenClaims(token) {
   try {
-    const res = await fetch(`${SUPABASE_URL}/auth/v1/token?grant_type=refresh_token`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        apikey: SUPABASE_ANON_KEY,
-      },
-      body: JSON.stringify({ refresh_token: refreshToken }),
-    });
-
-    if (!res.ok) {
-      console.warn("[LeetFlow] Token refresh failed", await res.text());
-      return null;
-    }
-
-    const newSession = await res.json();
-    await chrome.storage.local.set({ session: newSession });
-    console.log("[LeetFlow] Token refreshed successfully");
-    return newSession;
-  } catch (err) {
-    console.warn("[LeetFlow] Token refresh error", err.message);
+    const part = token.split(".")[1].replace(/-/g, "+").replace(/_/g, "/");
+    return JSON.parse(atob(part.padEnd(Math.ceil(part.length / 4) * 4, "=")));
+  } catch (_) {
     return null;
   }
 }
 
-// Returns true if the stored session token is expired or expiring within 60s
+// Only accept sessions issued by this extension's Supabase project.
+function isOurSession(session) {
+  if (!session?.access_token || !session?.user?.id) return false;
+  const claims = tokenClaims(session.access_token);
+  return claims?.iss === EXPECTED_TOKEN_ISSUER && claims?.sub === session.user.id;
+}
+
+// Stores the session unless we already hold a newer one for the same user.
+function storeSessionIfNewer(session) {
+  return withSessionLock(async () => {
+    if (!isOurSession(session)) return false;
+    const current = await getStoredSession();
+    const sameUser = current?.user?.id === session.user.id;
+    if (sameUser && (current.expires_at ?? 0) > (session.expires_at ?? 0)) return false;
+    if (sameUser && current.access_token === session.access_token) return false;
+    await chrome.storage.local.set({ session });
+    return true;
+  });
+}
+
+// Tells open dashboard tabs about a session the extension refreshed itself.
+async function broadcastSession(session) {
+  try {
+    const bridge = chrome.runtime
+      .getManifest()
+      .content_scripts?.find((cs) => cs.js?.includes("auth-bridge.js"));
+    if (!bridge) return;
+    const tabs = await chrome.tabs.query({ url: bridge.matches });
+    for (const tab of tabs) {
+      chrome.tabs.sendMessage(tab.id, { type: "SESSION_UPDATED", session }).catch(() => {});
+    }
+  } catch (_) {}
+}
+
+// Returns true if the session token is expired or expiring within 60s. The
+// dashboard refreshes 90s before expiry, so while it's open it usually
+// refreshes first and the extension just receives the new session.
 function isTokenExpired(session) {
   if (!session?.expires_at) return true;
   return session.expires_at - 60 < Math.floor(Date.now() / 1000);
 }
 
+// Returns a valid session, refreshing it with the stored refresh_token if needed.
+function getValidSession() {
+  return withSessionLock(async () => {
+    const session = await getStoredSession();
+    if (!session || !isTokenExpired(session)) return session;
+    if (!session.refresh_token) return null;
+
+    console.log("[LeetFlow] Token expired — refreshing");
+    try {
+      const res = await fetch(`${SUPABASE_URL}/auth/v1/token?grant_type=refresh_token`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", apikey: SUPABASE_ANON_KEY },
+        body: JSON.stringify({ refresh_token: session.refresh_token }),
+      });
+
+      if (!res.ok) {
+        // Keep the stored session: the dashboard may still hand over a newer one.
+        console.warn("[LeetFlow] Token refresh failed", await res.text());
+        return null;
+      }
+
+      const newSession = await res.json();
+      await chrome.storage.local.set({ session: newSession });
+      broadcastSession(newSession);
+      console.log("[LeetFlow] Token refreshed successfully");
+      return newSession;
+    } catch (err) {
+      console.warn("[LeetFlow] Token refresh error", err.message);
+      return null;
+    }
+  });
+}
+
 // ─── Supabase sync ────────────────────────────────────────────────────────────
+// Set when the database doesn't have the problem_title column yet (schema.sql
+// not re-run since it was added): sync without it instead of failing.
+let omitProblemTitle = false;
+
+function postProblems(rows, token) {
+  return fetch(`${SUPABASE_URL}/rest/v1/problems?on_conflict=user_id,problem_name,session_id`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${token}`,
+      apikey: SUPABASE_ANON_KEY,
+      Prefer: "resolution=merge-duplicates",
+    },
+    body: JSON.stringify(
+      omitProblemTitle ? rows.map(({ problem_title, ...r }) => r) : rows
+    ),
+  });
+}
+
 async function syncOnce() {
   const queue = await getQueue();
   const toSync = queue.filter(isSyncable);
   if (!toSync.length) return;
 
-  let { session } = await chrome.storage.local.get({ session: null });
-
-  // Refresh token if expired before attempting sync
-  if (isTokenExpired(session)) {
-    console.log("[LeetFlow] Token expired — refreshing");
-    session = await refreshSession();
-  }
-
+  const session = await getValidSession();
   const token = session?.access_token ?? null;
   const userId = session?.user?.id ?? null;
 
@@ -177,23 +249,23 @@ async function syncOnce() {
     return;
   }
 
+  const rows = toSync.map(({ _queued_at, _rev, ...r }) => ({ ...r, user_id: userId }));
   try {
-    const res = await fetch(`${SUPABASE_URL}/rest/v1/problems?on_conflict=user_id,problem_name,session_id`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${token}`,
-        apikey: SUPABASE_ANON_KEY,
-        Prefer: "resolution=merge-duplicates",
-      },
-      body: JSON.stringify(
-        toSync.map(({ _queued_at, _rev, ...r }) => ({ ...r, user_id: userId }))
-      ),
-    });
-
+    let res = await postProblems(rows, token);
     if (!res.ok) {
-      console.error("[LeetFlow] Sync failed", await res.text());
-      return;
+      const body = await res.text();
+      if (!omitProblemTitle && body.includes("problem_title")) {
+        console.warn("[LeetFlow] Database has no problem_title column — re-run supabase/schema.sql");
+        omitProblemTitle = true;
+        res = await postProblems(rows, token);
+        if (!res.ok) {
+          console.error("[LeetFlow] Sync failed", await res.text());
+          return;
+        }
+      } else {
+        console.error("[LeetFlow] Sync failed", body);
+        return;
+      }
     }
   } catch (err) {
     console.warn("[LeetFlow] Offline — will retry", err.message);
@@ -297,7 +369,9 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
 });
 
 // ─── Message handler ──────────────────────────────────────────────────────────
-chrome.runtime.onMessage.addListener((msg, _sender, respond) => {
+chrome.runtime.onMessage.addListener((msg, sender, respond) => {
+  if (sender.id !== chrome.runtime.id) return;
+
   if (msg.type === "LEETFLOW_FLUSH" || msg.type === "LEETFLOW_EVENT") {
     const record = msg.data;
 
@@ -326,6 +400,16 @@ chrome.runtime.onMessage.addListener((msg, _sender, respond) => {
     return true; // keep message channel open for async respond
   }
 
+  if (msg.type === "SYNC_NOW") {
+    (async () => {
+      await requestSync();
+      const pending = (await getQueue()).filter(isSyncable).length;
+      const signedIn = !!(await getStoredSession())?.access_token;
+      respond({ ok: true, pending, signedIn });
+    })().catch(() => respond({ ok: false }));
+    return true;
+  }
+
   if (msg.type === "GET_STATS") {
     getStats().then((s) => respond(currentStats(s)));
     return true;
@@ -336,13 +420,27 @@ chrome.runtime.onMessage.addListener((msg, _sender, respond) => {
     return true;
   }
 
+  // Session handover with the dashboard (auth-bridge.js)
+  if (msg.type === "GET_SESSION") {
+    // Tokens are only handed to the configured dashboard origin.
+    if (sender.origin !== DASHBOARD_ORIGIN) {
+      respond({ session: null });
+      return;
+    }
+    getStoredSession().then((session) => respond({ session }));
+    return true;
+  }
+
   if (msg.type === "SET_SESSION") {
-    chrome.storage.local.set({ session: msg.session }).then(() => respond({ ok: true }));
+    storeSessionIfNewer(msg.session).then((stored) => {
+      respond({ ok: stored });
+      if (stored) requestSync(); // records may be waiting for a valid session
+    });
     return true;
   }
 
   if (msg.type === "CLEAR_SESSION") {
-    chrome.storage.local.remove("session").then(() => respond({ ok: true }));
+    withSessionLock(() => chrome.storage.local.remove("session")).then(() => respond({ ok: true }));
     return true;
   }
 });

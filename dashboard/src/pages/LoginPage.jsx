@@ -29,8 +29,15 @@ export default function LoginPage() {
   }
 
   async function handleGoogle() {
-    setLoading(true);
-    await supabase.auth.signInWithOAuth({ provider: "google", options: { redirectTo: window.location.origin } });
+    setLoading(true); setError(null); setMessage(null);
+    try {
+      // On success the browser navigates away to Google
+      const { error } = await supabase.auth.signInWithOAuth({ provider: "google", options: { redirectTo: window.location.origin } });
+      if (error) throw error;
+    } catch (err) {
+      setError(err.message);
+      setLoading(false);
+    }
   }
 
   return (

@@ -9,9 +9,9 @@ import {
 // so fetch page by page until every matching row has been read.
 const FETCH_PAGE_SIZE = 1000;
 
-export async function fetchProblems({ userId, from, to } = {}) {
+export async function fetchProblems({ userId, from, to, client = supabase } = {}) {
   const pageQuery = (offset, withCount) => {
-    let query = supabase
+    let query = client
       .from("problems")
       .select("*", withCount ? { count: "exact" } : {})
       .order("started_at", { ascending: false })
@@ -37,15 +37,26 @@ export async function fetchProblems({ userId, from, to } = {}) {
   return rows;
 }
 
-export async function fetchSessions({ userId } = {}) {
-  let query = supabase
-    .from("sessions")
-    .select("*")
-    .order("start_time", { ascending: false });
-  if (userId) query = query.eq("user_id", userId);
-  const { data, error } = await query;
-  if (error) throw error;
-  return data ?? [];
+// ─── Problem identity and display ─────────────────────────────────────────────
+
+/**
+ * Display title for a problem row. problem_name is the problem's URL slug
+ * ("two-sum"); problem_title ("1. Two Sum") is only present on rows recorded
+ * since titles were captured, so older rows get a title derived from the slug.
+ */
+export function problemTitle(problem) {
+  if (problem.problem_title) return problem.problem_title;
+  const name = problem.problem_name || "";
+  if (!/^[a-z0-9]+(-[a-z0-9]+)*$/.test(name)) return name;
+  return name
+    .split("-")
+    .map((word) => (/^(i|ii|iii|iv|v|vi)$/.test(word) ? word.toUpperCase() : word[0].toUpperCase() + word.slice(1)))
+    .join(" ");
+}
+
+/** LeetCode URL of a problem row. */
+export function problemUrl(problem) {
+  return `https://leetcode.com/problems/${encodeURIComponent(problem.problem_name)}/`;
 }
 
 // ─── Dates and status ─────────────────────────────────────────────────────────
@@ -77,6 +88,24 @@ export function effectiveStatus(problem, now = Date.now()) {
 
 // ─── Data processing helpers (all client-side) ────────────────────────────────
 
+/**
+ * Distinct problems with at least one accepted solve, as
+ * [{ name, difficulty }]. Rows are per problem per day, so the same problem
+ * solved on several days appears once.
+ */
+export function solvedProblems(problems) {
+  const solved = new Map();
+  for (const p of problems) {
+    if (p.status !== "accepted") continue;
+    const difficulty = (p.difficulty || "").toLowerCase();
+    const known = solved.get(p.problem_name);
+    if (!known || (known.difficulty === "unknown" && difficulty !== "unknown")) {
+      solved.set(p.problem_name, { name: p.problem_name, difficulty: difficulty || "unknown" });
+    }
+  }
+  return [...solved.values()];
+}
+
 /** Accepted problems per local date (YYYY-MM-DD) */
 export function groupByDate(problems) {
   return problems.reduce((acc, p) => {
@@ -102,22 +131,16 @@ export function buildHeatmapData(problems, today = new Date()) {
   return days;
 }
 
-/** Difficulty distribution */
+/** Distinct solved problems per difficulty */
 export function buildDifficultyData(problems) {
   const counts = { easy: 0, medium: 0, hard: 0 };
-  const times = { easy: 0, medium: 0, hard: 0 };
-  for (const p of problems) {
-    if (p.status !== "accepted") continue;
-    const d = (p.difficulty || "").toLowerCase();
-    if (d in counts) {
-      counts[d]++;
-      times[d] += p.time_taken ?? 0;
-    }
+  for (const { difficulty } of solvedProblems(problems)) {
+    if (difficulty in counts) counts[difficulty]++;
   }
   return [
-    { name: "Easy", count: counts.easy, totalTime: times.easy, color: "#22c55e" },
-    { name: "Medium", count: counts.medium, totalTime: times.medium, color: "#f59e0b" },
-    { name: "Hard", count: counts.hard, totalTime: times.hard, color: "#f43f5e" },
+    { name: "Easy", count: counts.easy, color: "#22c55e" },
+    { name: "Medium", count: counts.medium, color: "#f59e0b" },
+    { name: "Hard", count: counts.hard, color: "#f43f5e" },
   ];
 }
 
@@ -134,7 +157,7 @@ export function buildTimeTrendData(problems, windowSize = 7) {
       label: `#${i + 1}`,
       time: Math.round(p.time_taken / 60),
       avg: Math.round(avg / 60),
-      name: p.problem_name,
+      name: problemTitle(p),
       difficulty: p.difficulty,
     };
   });
@@ -179,8 +202,7 @@ export function buildEfficiencyData(problems) {
 
 /**
  * Session timeline data — groups problems by local calendar date.
- * Each unique date = one "session" entry, so this works regardless
- * of whether session_id is populated on problem rows.
+ * Each unique date = one "session" entry.
  */
 export function buildSessionData(problems) {
   const dateMap = {};
@@ -216,9 +238,12 @@ export function buildHourlyData(problems) {
 }
 
 // ─── Smart insights engine ────────────────────────────────────────────────────
+// Insight text is a list of parts — plain strings and { strong } — rendered by
+// InsightCard as React elements (never as HTML, since tags come from scraped
+// page content).
 export function generateInsights(problems) {
   const insights = [];
-  if (!problems.length) return [{ type: "info", text: "Solve your first problem to unlock insights!" }];
+  if (!problems.length) return [{ type: "info", title: "Getting Started", text: ["Solve your first problem to unlock insights!"] }];
 
   const topicData = buildTopicData(problems);
 
@@ -229,7 +254,7 @@ export function generateInsights(problems) {
       type: "warning",
       title: "Optimization Alert",
       label: `Topic: ${slowest.tag}`,
-      text: `You average <strong>${slowest.avgTime}m</strong> on ${slowest.tag} problems — try timed drills to speed up.`,
+      text: ["You average ", { strong: `${slowest.avgTime}m` }, ` on ${slowest.tag} problems — try timed drills to speed up.`],
     });
   }
 
@@ -242,7 +267,7 @@ export function generateInsights(problems) {
       type: "alert",
       title: "Fatigue Detection",
       label: "Pattern",
-      text: `After 60 min your success rate is <strong>${rate}%</strong> — take short breaks to maintain accuracy.`,
+      text: ["After 60 min your success rate is ", { strong: `${rate}%` }, " — take short breaks to maintain accuracy."],
     });
   }
 
@@ -254,7 +279,7 @@ export function generateInsights(problems) {
       type: "success",
       title: "Peak Performance",
       label: "Time of Day",
-      text: `You solve problems best around <strong>${peakHour.hour}:00–${peakHour.hour + 1}:00</strong>. Schedule hard problems then.`,
+      text: ["You solve problems best around ", { strong: `${peakHour.hour}:00–${peakHour.hour + 1}:00` }, ". Schedule hard problems then."],
     });
   }
 
@@ -279,7 +304,11 @@ export function generateInsights(problems) {
       type: pct >= 0 ? "success" : "info",
       title: "Weekly Comparison",
       label: "Progress",
-      text: `This week: <strong>${thisWeek.length}</strong> problems vs last week: <strong>${lastWeek.length}</strong> (${pct > 0 ? "+" : ""}${pct}%).`,
+      text: [
+        "This week: ", { strong: String(thisWeek.length) },
+        " problems vs last week: ", { strong: String(lastWeek.length) },
+        ` (${pct > 0 ? "+" : ""}${pct}%).`,
+      ],
     });
   }
 
@@ -356,10 +385,36 @@ export function buildSlowestProblems(problems, limit = 8) {
     .sort((a, b) => b.time_taken - a.time_taken)
     .slice(0, limit)
     .map(p => ({
-      name:       p.problem_name,
+      name:       problemTitle(p),
       difficulty: p.difficulty,
       mins:       Math.floor(p.time_taken / 60),
       secs:       (p.time_taken % 60).toString().padStart(2, "0"),
       attempts:   p.attempts || 1,
     }));
+}
+
+// ─── CSV export ───────────────────────────────────────────────────────────────
+function csvCell(value) {
+  let text = value === null || value === undefined ? "" : String(value);
+  // Neutralise spreadsheet formulas (CSV injection)
+  if (/^[=+\-@\t\r]/.test(text)) text = `'${text}`;
+  return /[",\r\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+}
+
+/** CSV of problem rows, one line per row. */
+export function problemsToCsv(problems, now = Date.now()) {
+  const header = ["Problem", "Slug", "Difficulty", "Tags", "Time (s)", "Attempts", "Status", "Date", "Started at", "Completed at"];
+  const lines = problems.map((p) => [
+    problemTitle(p),
+    p.problem_name,
+    p.difficulty,
+    (p.tags || []).join("; "),
+    p.time_taken ?? 0,
+    p.attempts ?? 0,
+    effectiveStatus(p, now),
+    localDateKey(p.started_at) ?? "",
+    p.started_at ?? "",
+    p.completed_at ?? "",
+  ].map(csvCell).join(","));
+  return [header.join(","), ...lines].join("\r\n");
 }

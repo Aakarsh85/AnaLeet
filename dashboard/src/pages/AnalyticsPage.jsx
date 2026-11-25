@@ -1,10 +1,11 @@
-import React, { useState, useEffect, useMemo } from "react";
-import { BarChart, Bar, LineChart, Line, XAxis, YAxis, Tooltip, Legend, ResponsiveContainer, Cell, RadarChart, PolarGrid, PolarAngleAxis, Radar } from "recharts";
-import { useAuth } from "../App.jsx";
-import { fetchProblems, buildSessionData, buildAttemptEfficiencyTrend, buildDifficultyProgressionData, buildSlowestProblems, localDateKey } from "../lib/dataProcessor.js";
+import React, { useState, useMemo } from "react";
+import { BarChart, Bar, LineChart, Line, XAxis, YAxis, Tooltip, Legend, ResponsiveContainer } from "recharts";
+import { useProblems } from "../lib/useProblems.js";
+import { buildSessionData, buildAttemptEfficiencyTrend, buildDifficultyProgressionData, buildSlowestProblems, localDateKey } from "../lib/dataProcessor.js";
 import { PeakHoursChart, EfficiencyChart } from "../components/charts/PerformanceCharts.jsx";
 import TopicChart from "../components/charts/TopicChart.jsx";
-import { BentoCard, C, LoadingSpinner } from "../components/UI.jsx";
+import DateRangeFilter from "../components/DateRangeFilter.jsx";
+import { BentoCard, ErrorBanner, C, LoadingSpinner } from "../components/UI.jsx";
 import { subDays } from "date-fns";
 
 function BurnoutMeter({ problems }) {
@@ -215,71 +216,76 @@ function SlowestProblems({ problems }) {
 }
 
 export default function AnalyticsPage() {
-  const { user } = useAuth();
-  const [problems, setProblems] = useState([]);
-  const [loading, setLoading] = useState(true);
+  const { problems, loading, error, refetch } = useProblems();
+  const [rangeDays, setRangeDays] = useState(0); // 0 = all time
 
-  useEffect(() => {
-    if (!user) return;
-    fetchProblems({ userId: user.id })
-      .then(setProblems)
-      .finally(() => setLoading(false));
-  }, [user]);
+  // Charts below use the selected range; Burnout Risk and This Week vs Last
+  // Week always look at their own fixed windows.
+  const inRange = useMemo(() => {
+    if (!rangeDays) return problems;
+    const since = subDays(new Date(), rangeDays);
+    return problems.filter((p) => p.started_at && new Date(p.started_at) >= since);
+  }, [problems, rangeDays]);
 
   if (loading) return <LoadingSpinner />;
 
   return (
     <div style={{ maxWidth: 1440, margin: "0 auto" }}>
-      <div style={{ marginBottom: 32 }}>
-        <h2 style={{ fontSize: 28, fontWeight: 900, letterSpacing: "-0.02em", color: "#fff" }}>Deep Analytics</h2>
-        <p style={{ fontSize: 14, color: C.muted, marginTop: 4 }}>Cognitive performance patterns and advanced metrics.</p>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "end", marginBottom: 32 }}>
+        <div>
+          <h2 style={{ fontSize: 28, fontWeight: 900, letterSpacing: "-0.02em", color: "#fff" }}>Deep Analytics</h2>
+          <p style={{ fontSize: 14, color: C.muted, marginTop: 4 }}>Cognitive performance patterns and advanced metrics.</p>
+        </div>
+        <DateRangeFilter active={rangeDays} onChange={setRangeDays} />
       </div>
+
+      <ErrorBanner message={error} onRetry={refetch} />
 
       <div style={{ display: "grid", gridTemplateColumns: "repeat(12, 1fr)", gap: 24 }}>
 
         {/* Peak hours - wide */}
         <div style={{ gridColumn: "span 8" }}>
-          <PeakHoursChart problems={problems} />
+          <PeakHoursChart problems={inRange} />
         </div>
 
-        {/* Burnout meter */}
+        {/* Burnout meter (fixed 14-day window) */}
         <div style={{ gridColumn: "span 4" }}>
           <BurnoutMeter problems={problems} />
         </div>
 
         {/* Topic chart */}
         <div style={{ gridColumn: "span 7" }}>
-          <TopicChart problems={problems} />
+          <TopicChart problems={inRange} />
         </div>
 
         {/* Efficiency */}
         <div style={{ gridColumn: "span 5" }}>
-          <EfficiencyChart problems={problems} />
+          <EfficiencyChart problems={inRange} />
         </div>
 
         {/* Session timeline */}
         <div style={{ gridColumn: "span 6" }}>
-          <SessionTimeline problems={problems} />
+          <SessionTimeline problems={inRange} />
         </div>
 
-        {/* Weekly comparison */}
+        {/* Weekly comparison (fixed: last 7 vs previous 7 days) */}
         <div style={{ gridColumn: "span 6" }}>
           <WeeklyComparison problems={problems} />
         </div>
 
         {/* Attempt efficiency over time */}
         <div style={{ gridColumn: "span 6" }}>
-          <AttemptEfficiencyChart problems={problems} />
+          <AttemptEfficiencyChart problems={inRange} />
         </div>
 
         {/* Difficulty progression */}
         <div style={{ gridColumn: "span 6" }}>
-          <DifficultyProgressionChart problems={problems} />
+          <DifficultyProgressionChart problems={inRange} />
         </div>
 
         {/* Slowest problems */}
         <div style={{ gridColumn: "span 12" }}>
-          <SlowestProblems problems={problems} />
+          <SlowestProblems problems={inRange} />
         </div>
 
       </div>

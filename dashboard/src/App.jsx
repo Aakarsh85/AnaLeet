@@ -17,10 +17,14 @@ export default function App() {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    supabase.auth.getSession().then(({ data }) => {
-      setUser(data.session?.user ?? null);
-      setLoading(false);
-    });
+    supabase.auth.getSession()
+      .then(({ data }) => setUser(data.session?.user ?? null))
+      .catch((err) => {
+        // Treat as signed out rather than staying on the loading screen
+        console.error("[LeetFlow] Could not restore session:", err);
+        setUser(null);
+      })
+      .finally(() => setLoading(false));
 
     const { data: listener } = supabase.auth.onAuthStateChange((_event, session) => {
       setUser(session?.user ?? null);

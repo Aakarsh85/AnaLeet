@@ -100,18 +100,22 @@ like `https://leetflow-yourname.vercel.app`. Click **Visit** to open it.
 
 ## Part 3 — Update the Chrome extension
 
-Your extension has the dashboard URL hardcoded. Now that it's deployed, update it.
+The extension needs to know where the dashboard lives: it opens it from the popup and
+picks up your sign-in session from it.
 
-**Step 7 — Update the URL in popup.js**
+**Step 7 — Set the dashboard URL**
 
-Open `extension/popup.js` and change the first line:
+In `extension/config.js`:
 
 ```js
-// Before
-const DASHBOARD_URL = "http://localhost:5173";
+export const DASHBOARD_URL = "https://leetflow-yourname.vercel.app/";
+```
 
-// After
-const DASHBOARD_URL = "https://leetflow-yourname.vercel.app";
+and in `extension/manifest.json`, use the same address in `host_permissions` and in the
+`matches` of the `auth-bridge.js` content script:
+
+```json
+"https://leetflow-yourname.vercel.app/*"
 ```
 
 Replace `leetflow-yourname.vercel.app` with your actual Vercel URL.
@@ -121,6 +125,13 @@ Replace `leetflow-yourname.vercel.app` with your actual Vercel URL.
 1. Go to `chrome://extensions/`
 2. Find LeetFlow and click the **↺ refresh** icon
 3. The Open Dashboard button in the popup now opens your live site
+4. Sign in on the live site — the extension picks up the session automatically
+
+> The dashboard's **Download Extension** link serves `dashboard/public/leetflow-extension.zip`,
+> which `npm run build` regenerates from `extension/` on every deploy. If your Vercel project
+> doesn't include files outside the `dashboard` root directory in the build (Settings → General
+> → Root Directory), the build keeps the committed zip — run `npm run build:extension` locally
+> and commit it after changing the extension.
 
 ---
 
@@ -152,6 +163,10 @@ git push
 
 Vercel detects the push and redeploys automatically within 60 seconds.
 Your live URL stays the same — no manual steps needed.
+
+> If the changes touch `supabase/*.sql`, also re-run those files in the Supabase SQL
+> Editor (`schema.sql` first, then `leaderboard.sql`) — they're safe to re-run. Database
+> changes don't deploy with the dashboard.
 
 ---
 
@@ -187,6 +202,6 @@ Settings → Environment Variables → check both `VITE_SUPABASE_URL` and
 - [ ] `VITE_SUPABASE_URL` environment variable added
 - [ ] `VITE_SUPABASE_ANON_KEY` environment variable added
 - [ ] First deploy succeeded — live URL works
-- [ ] `DASHBOARD_URL` in `extension/popup.js` updated to Vercel URL
+- [ ] `DASHBOARD_URL` in `extension/config.js` and the dashboard address in `extension/manifest.json` updated to the Vercel URL
 - [ ] Extension reloaded in `chrome://extensions/`
 - [ ] Supabase redirect URL updated (if using Google OAuth)

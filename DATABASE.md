@@ -1,199 +1,130 @@
-# 🚀 LeetFlow — LeetCode Performance Analytics System
+# 🗄️ LeetFlow Database
 
-A **silent-tracking Chrome extension + React analytics dashboard** that automatically measures your LeetCode problem-solving performance and surfaces meaningful insights.
+LeetFlow uses a Supabase (Postgres) project. Everything is created by two SQL files,
+run in the Supabase **SQL Editor** in this order:
 
----
+| Order | File | Creates |
+|---|---|---|
+| 1st | `supabase/schema.sql` | `problems`, `bookmarks`, RLS policies, constraints, `updated_at` trigger |
+| 2nd | `supabase/leaderboard.sql` | `profiles`, signup trigger, `get_leaderboard()` |
 
-## 📁 Project Structure
-
-```
-leetflow/
-├── extension/               # Chrome Extension (Manifest V3)
-│   ├── manifest.json        # Extension config & permissions
-│   ├── content.js           # Silent tracker (runs on leetcode.com/problems/*)
-│   ├── background.js        # Service worker — storage, sync, alarms
-│   ├── popup.html           # Extension popup UI
-│   ├── popup.js             # Popup logic
-│   ├── injected.js          # Runs in the MAIN world (page context) Communicates back to content.js via window.postMessage.
-│   ├── config.js            # ← Add your Supabase credentials here
-│   └── icons/               # Extension icons (add 16, 48, 128px PNGs)
-│
-├── dashboard/               # React + Vite analytics dashboard
-│   ├── src/
-│   │   ├── App.jsx          # Router + auth context
-│   │   ├── main.jsx         # Entry point
-│   │   ├── lib/
-│   │   │   ├── supabase.js  # Supabase client
-│   │   │   ├── dataProcessor.js  # All data transforms (client-side)
-│   │   │   ├── bookmarks.js # Bookmark/retry system
-│   │   │   └── useProblems.js    # Shared data hook
-│   │   ├── components/
-│   │   │   ├── Layout.jsx   # Sidebar + header shell
-│   │   │   ├── UI.jsx       # Design system components
-│   │   │   ├── DateRangeFilter.jsx
-│   │   │   └── charts/
-│   │   │       ├── ActivityHeatmap.jsx
-│   │   │       ├── TimeTrendChart.jsx
-│   │   │       ├── TopicChart.jsx
-│   │   │       └── PerformanceCharts.jsx
-│   │   └── pages/
-│   │       ├── LoginPage.jsx
-│   │       ├── DashboardPage.jsx  # Overview + heatmap + trends
-│   │       ├── ProblemsPage.jsx   # Table + filters + insights
-│   │       └── AnalyticsPage.jsx  # Deep analytics + burnout + sessions
-│   ├── .env.example
-│   ├── index.html
-│   ├── vite.config.js
-│   └── package.json
-│
-└── supabase/
-    └── schema.sql           # Run this in Supabase SQL editor
-```
+**Both files are safe to re-run.** To apply changes to an existing project, run both again
+in the same order — they use `if not exists` / `drop … if exists` throughout and never
+delete your data.
 
 ---
 
-## ⚡ Quick Setup (15 minutes)
+## Tables
 
-### Step 1 — Create Supabase project
+### `problems`
 
-1. Go to [supabase.com](https://supabase.com) and create a free project
-2. Open **SQL Editor** and run the contents of `supabase/schema.sql`
-3. Go to **Settings → API** and copy:
-   - Project URL
-   - `anon` / `public` key
+One row per **user + problem + day**. The extension creates and updates rows through the
+REST API (an upsert on `(user_id, problem_name, session_id)`), so repeat visits to a
+problem on the same day update one row.
 
-### Step 2 — Configure the extension
+| Column | Type | Notes |
+|---|---|---|
+| `id` | uuid | Primary key |
+| `user_id` | uuid | → `auth.users`, cascades on delete |
+| `problem_name` | text | URL slug, e.g. `two-sum` — the problem's identity |
+| `problem_title` | text | Display title, e.g. `1. Two Sum`; null on older rows |
+| `difficulty` | text | `easy` / `medium` / `hard` / `unknown` |
+| `tags` | text[] | Topic tags, lowercased |
+| `time_taken` | integer | Active seconds; 0–86400 |
+| `attempts` | integer | Submissions up to and including the accepted one; 0–1000 |
+| `status` | text | `in_progress` / `accepted` / `failed` |
+| `started_at` | timestamptz | First opened that day |
+| `completed_at` | timestamptz | Accepted at |
+| `session_id` | text | `session_YYYY-MM-DD` (the user's local day) |
+| `created_at`, `updated_at` | timestamptz | `updated_at` is set by a trigger on every update |
 
-Edit `extension/config.js`:
-```js
-export const SUPABASE_URL = "https://YOUR_PROJECT_ID.supabase.co";
-export const SUPABASE_ANON_KEY = "YOUR_ANON_KEY";
-```
+Unique key: `(user_id, problem_name, session_id)`.
+Indexes: `(user_id, started_at desc)`, `(user_id, status)`.
 
-### Step 3 — Load the extension in Chrome
+The `time_taken` and `attempts` range checks are `NOT VALID`: they apply to new and
+updated rows without rejecting anything already stored.
 
-1. Open `chrome://extensions/`
-2. Enable **Developer mode** (top right toggle)
-3. Click **Load unpacked** → select the `extension/` folder
-4. Pin LeetFlow from the extensions toolbar
+### `bookmarks`
 
-### Step 4 — Set up the dashboard
+Problems flagged for retry from the Problems page. Unique on `(user_id, problem_name)`;
+`problem_name` is the slug, matching `problems.problem_name`.
 
-```bash
-cd dashboard
-cp .env.example .env
-# Edit .env with your Supabase credentials
+### `profiles`
 
-npm install
-npm run dev
-# Opens at http://localhost:5173
-```
+| Column | Notes |
+|---|---|
+| `user_id` | Primary key → `auth.users` |
+| `display_name` | Shown on the leaderboard; 2–32 characters |
 
-### Step 5 — Sign in
+A row is created on signup by the `on_auth_user_created` trigger, with an anonymous
+handle like `coder-3f9a1c` (`default_display_name()`). Users change their name from the
+Leaderboard page.
 
-Open `http://localhost:5173` → sign in with Google or email.
-
-> The extension popup shows a link to open your dashboard. After signing in, the extension automatically gets your session token via `chrome.storage.local`.
-
----
-
-## 🧩 How Tracking Works
-
-```
-LeetCode page loaded
-  └── content.js activates silently
-        ├── Scrapes problem title, difficulty, tags from DOM
-        ├── Waits for first keyboard/mouse interaction
-        ├── Starts active-time ticker (pauses on idle >60s or tab hidden)
-        ├── Intercepts fetch() to /graphql (passive — no request modification)
-        │     └── Detects submission results and accepted status
-        └── Flushes to background.js every 5 min + on accepted + on page leave
-
-background.js
-  ├── Stores records in chrome.storage.local (offline-safe queue)
-  ├── Deduplicates by problem_name + session_id
-  ├── Syncs to Supabase on accepted submission
-  ├── Runs alarm every 5 minutes to sync the queue
-  └── Updates local streak/stats counters
-
-dashboard
-  └── Fetches raw data from Supabase
-        └── Processes entirely client-side (no pre-aggregation)
-              ├── Activity heatmap (365 days)
-              ├── Time trend with 7-problem moving average
-              ├── Difficulty distribution
-              ├── Topic-wise success rate + avg time
-              ├── Hourly peak performance analysis
-              ├── Burnout risk meter (sessions > 2h)
-              ├── Weekly self-comparison
-              └── Smart insights engine (AI-style text insights)
-```
+> Earlier versions used the part of the email before the `@` as the display name, which
+> exposed it to every user. Re-running `leaderboard.sql` replaces any name that still
+> equals the user's email prefix with the anonymous handle.
 
 ---
 
-## 📊 Dashboard Pages
+## Row Level Security
 
-| Page | What you see |
-|------|-------------|
-| **Dashboard** | Total solved, streak, avg time, 365-day heatmap, time trend, difficulty distribution, recent solves, smart insights |
-| **Problems** | Filterable table (search, difficulty, tag, status), topic mastery bars, insight panel |
-| **Analytics** | Peak hours bar chart, burnout risk meter, topic analysis, attempts efficiency pie, session timeline, week-over-week comparison |
+RLS is enabled on every table.
 
----
-
-## 🔐 Security & Privacy
-
-- Uses **Row Level Security** — users can only read/write their own data
-- Extension only **reads** DOM and **listens** to network responses — never modifies them
-- No LeetCode actions are automated
-- Auth token stored in `chrome.storage.local` (not localStorage)
+| Table | Who can do what |
+|---|---|
+| `problems` | Users select, insert, update and delete only their own rows |
+| `bookmarks` | Users select, insert and delete only their own rows |
+| `profiles` | Any signed-in user can read display names; users update only their own |
 
 ---
 
-## 🚢 Deploy Dashboard (Optional)
+## Functions
 
-```bash
-cd dashboard
-npm run build
-# Deploy the dist/ folder to Vercel, Netlify, or any static host
-```
+### `get_leaderboard(date_from timestamptz, date_to timestamptz)`
 
-Update `DASHBOARD_URL` in `extension/popup.js` to your deployed URL.
+The only cross-user view. It runs with owner rights (`SECURITY DEFINER`) to aggregate
+across users, and returns only aggregates — no problem rows and no user ids:
 
----
+| Column | Meaning |
+|---|---|
+| `display_name` | From `profiles` |
+| `is_current_user` | True on the caller's own row |
+| `total_submissions` | Sum of `attempts` (an accepted row counts at least 1) |
+| `total_solved` | Distinct problems with an accepted row |
+| `easy_solved`, `medium_solved`, `hard_solved` | Distinct solved problems by difficulty |
+| `accuracy` | Accepted submissions ÷ submissions × 100 |
+| `points` | Easy 1, Medium 3, Hard 5 — per distinct solved problem |
 
-## 🧠 Smart Insights Engine
+Rows are filtered by `started_at` and ordered by points. Only the `authenticated` role
+can call it (execute is revoked from `anon`).
 
-Generates natural-language insights including:
-- **Slowest topic detection** — "You average 34m on DP problems"
-- **Fatigue pattern detection** — "Success rate drops after 60 min sessions"
-- **Peak performance hours** — "You solve best at 21:00–22:00"
-- **Weekly progress comparison** — "+23% problems this week vs last"
+### Others
 
----
+| Function | Purpose |
+|---|---|
+| `set_updated_at()` | Trigger: keeps `problems.updated_at` current |
+| `handle_new_user()` | Trigger on `auth.users`: creates the `profiles` row |
+| `default_display_name(uuid)` | The anonymous `coder-xxxxxx` handle |
 
-## 🔄 Extending the System
-
-### Add a new metric
-1. Write a pure function in `src/lib/dataProcessor.js`
-2. Use it in any page/chart component
-3. Always process raw data — never store aggregates in Supabase
-
-### Add a new chart
-1. Create `src/components/charts/YourChart.jsx`
-2. Import Recharts components
-3. Use `BentoCard` wrapper from `UI.jsx` for consistent styling
-4. Add to any page's grid layout
+All functions pin `search_path`, so they can't be redirected to objects in other schemas.
 
 ---
 
-## 📦 Tech Stack
+## Security notes
 
-| Layer | Technology |
-|-------|-----------|
-| Extension | Chrome MV3, Vanilla JS, Tailwind CDN |
-| Database | Supabase (PostgreSQL + Auth + RLS) |
-| Dashboard | React 18 + Vite |
-| Charts | Recharts |
-| Date utils | date-fns |
-| Styling | Inline styles (Deep Logic design system) |
+- Rows are written by each user's own extension with their own token, so leaderboard
+  stats are self-reported: RLS stops users writing to *other* accounts, not inflating
+  their own. The range checks only catch impossible values.
+- The publishable/anon key in `extension/config.js` and the dashboard is meant to be
+  public; RLS is what protects the data.
+
+---
+
+## Removed objects (existing projects)
+
+Re-running `schema.sql` cleans these up where it can:
+
+- **`upsert_problem()`** — dropped automatically. It ran with owner rights and accepted a
+  user id parameter, so any client could write into any account. Nothing used it.
+- **`sessions` table** — never written to and no longer created. It's left in place on
+  existing projects; remove it with `drop table if exists public.sessions;` if you like.

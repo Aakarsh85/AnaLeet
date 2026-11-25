@@ -93,7 +93,25 @@ export function InsightCard({ insight }) {
         <span style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", color: s.title }}>{insight.title}</span>
         {insight.label && <span style={{ fontSize: 10, color: C.subtle }}>{insight.label}</span>}
       </div>
-      <p style={{ fontSize: 13, color: C.text, lineHeight: 1.5 }} dangerouslySetInnerHTML={{ __html: insight.text }} />
+      <p style={{ fontSize: 13, color: C.text, lineHeight: 1.5 }}>
+        {[].concat(insight.text).map((part, i) =>
+          typeof part === "string" ? part : <strong key={i}>{part.strong}</strong>
+        )}
+      </p>
+    </div>
+  );
+}
+
+export function ErrorBanner({ message, onRetry }) {
+  if (!message) return null;
+  return (
+    <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, padding: "12px 16px", background: "rgba(147,0,10,0.2)", border: "1px solid rgba(147,0,10,0.4)", borderRadius: 8, color: "#ffb4ab", fontSize: 13, marginBottom: 24 }}>
+      <span>Error loading data: {message}</span>
+      {onRetry && (
+        <button onClick={() => onRetry()} style={{ background: "transparent", border: "1px solid rgba(255,180,171,0.4)", borderRadius: 6, color: "#ffb4ab", fontSize: 12, fontWeight: 600, padding: "4px 10px", cursor: "pointer" }}>
+          Retry
+        </button>
+      )}
     </div>
   );
 }

@@ -1,8 +1,9 @@
 import React, { useState, useEffect, useMemo } from "react";
 import { useAuth } from "../App.jsx";
 import { supabase } from "../lib/supabase.js";
-import { fetchProblems, calcStreak } from "../lib/dataProcessor.js";
-import { BentoCard, C, LoadingSpinner } from "../components/UI.jsx";
+import { calcStreak } from "../lib/dataProcessor.js";
+import { useProblems } from "../lib/useProblems.js";
+import { BentoCard, ErrorBanner, C, LoadingSpinner } from "../components/UI.jsx";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 const TIME_FILTERS = [
@@ -21,6 +22,7 @@ function podiumSizeFor(entries) {
 }
 
 // ─── Data fetching ────────────────────────────────────────────────────────────
+// Entries never include user ids; the signed-in user's row has is_current_user.
 async function fetchLeaderboard({ days }) {
   const dateFrom = days
     ? new Date(Date.now() - days * 86_400_000).toISOString()
@@ -33,8 +35,62 @@ async function fetchLeaderboard({ days }) {
   return data || [];
 }
 
+// ─── Display name ─────────────────────────────────────────────────────────────
+function DisplayNameEditor({ userId, currentName, onSaved }) {
+  const [editing, setEditing] = useState(false);
+  const [name, setName] = useState(currentName);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState(null);
+
+  useEffect(() => setName(currentName), [currentName]);
+
+  async function save(e) {
+    e.preventDefault();
+    const trimmed = name.trim();
+    if (trimmed.length < 2 || trimmed.length > 32) {
+      setError("Use 2–32 characters.");
+      return;
+    }
+    setSaving(true);
+    const { error } = await supabase.from("profiles").update({ display_name: trimmed }).eq("user_id", userId);
+    setSaving(false);
+    if (error) { setError(error.message); return; }
+    setError(null);
+    setEditing(false);
+    onSaved();
+  }
+
+  if (!editing) {
+    return (
+      <button onClick={() => setEditing(true)} title="Change the name other users see"
+        style={{ background: "transparent", border: "none", color: C.blue, fontSize: 12, cursor: "pointer", padding: 0, display: "flex", alignItems: "center", gap: 4 }}>
+        <span className="material-symbols-outlined" style={{ fontSize: 14 }}>edit</span>
+        Change display name
+      </button>
+    );
+  }
+
+  return (
+    <form onSubmit={save} style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+      <div style={{ display: "flex", gap: 6 }}>
+        <input value={name} onChange={(e) => setName(e.target.value)} maxLength={32} autoFocus
+          style={{ flex: 1, minWidth: 0, padding: "6px 10px", background: "#0e0e10", border: "1px solid #23232E", borderRadius: 6, color: "#e5e1e4", fontSize: 13, outline: "none" }} />
+        <button type="submit" disabled={saving}
+          style={{ padding: "6px 10px", background: C.blue, border: "none", borderRadius: 6, color: "#fff", fontSize: 12, fontWeight: 700, cursor: "pointer", opacity: saving ? 0.6 : 1 }}>
+          Save
+        </button>
+        <button type="button" onClick={() => { setEditing(false); setName(currentName); setError(null); }}
+          style={{ padding: "6px 10px", background: "transparent", border: "1px solid #23232E", borderRadius: 6, color: C.muted, fontSize: 12, cursor: "pointer" }}>
+          Cancel
+        </button>
+      </div>
+      {error && <span style={{ fontSize: 11, color: "#ffb4ab" }}>{error}</span>}
+    </form>
+  );
+}
+
 // ─── Podium ───────────────────────────────────────────────────────────────────
-function Podium({ entries, currentUserId }) {
+function Podium({ entries }) {
   // Visual order: 2nd · 1st · 3rd
   const slots = [
     { entry: entries[1], rank: 2 },
@@ -47,11 +103,11 @@ function Podium({ entries, currentUserId }) {
       {slots.map(({ entry, rank }) => {
         const accent        = RANK_ACCENT[rank];
         const isFirst       = rank === 1;
-        const isCurrentUser = entry.user_id === currentUserId;
+        const isCurrentUser = entry.is_current_user;
 
         return (
           <BentoCard
-            key={entry.user_id}
+            key={rank}
             style={{
               padding: isFirst ? "28px 24px" : "20px 24px",
               display: "flex", flexDirection: "column", alignItems: "center", gap: 12,
@@ -90,7 +146,7 @@ function Podium({ entries, currentUserId }) {
                 padding: "3px 8px", borderRadius: 9999, fontSize: 10, fontWeight: 700,
                 background: `${accent}18`, color: accent, border: `1px solid ${accent}30`,
               }}>
-                {entry.accuracy}% ACC
+                {Number(entry.accuracy)}% ACC
               </span>
               <span style={{
                 padding: "3px 8px", borderRadius: 9999, fontSize: 10, fontWeight: 700,
@@ -107,74 +163,75 @@ function Podium({ entries, currentUserId }) {
 }
 
 // ─── Rankings table ───────────────────────────────────────────────────────────
-function RankingsTable({ entries, currentUserId }) {
+function AccuracyCell({ value }) {
+  const color = value >= 80 ? C.easy : value >= 60 ? C.medium : C.hard;
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+      <div style={{ width: 64, height: 4, background: C.container, borderRadius: 9999, overflow: "hidden" }}>
+        <div style={{ height: "100%", width: `${value}%`, background: color, borderRadius: 9999 }} />
+      </div>
+      <span style={{ fontSize: 12, color: C.muted, fontFamily: "monospace" }}>{value}%</span>
+    </div>
+  );
+}
+
+function Row({ entry, rank }) {
+  const isCurrentUser = entry.is_current_user;
+  return (
+    <tr
+      style={{
+        borderBottom: "1px solid #23232E",
+        background: isCurrentUser ? "rgba(0,112,255,0.06)" : "transparent",
+        transition: "background 0.1s",
+      }}
+      onMouseEnter={(e) => { if (!isCurrentUser) e.currentTarget.style.background = "rgba(42,42,44,0.3)"; }}
+      onMouseLeave={(e) => { if (!isCurrentUser) e.currentTarget.style.background = "transparent"; }}
+    >
+      <td style={{ padding: "14px 16px", fontSize: 13, fontWeight: 700, color: isCurrentUser ? C.blue : C.muted, fontFamily: "monospace" }}>
+        {rank}
+      </td>
+      <td style={{ padding: "14px 16px" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+          <div style={{
+            width: 32, height: 32, borderRadius: "50%", flexShrink: 0,
+            background: isCurrentUser ? "rgba(0,112,255,0.15)" : C.container,
+            border: `1px solid ${isCurrentUser ? "rgba(0,112,255,0.3)" : "#23232E"}`,
+            display: "flex", alignItems: "center", justifyContent: "center",
+            fontSize: 13, fontWeight: 700,
+            color: isCurrentUser ? C.blue : C.muted,
+          }}>
+            {(entry.display_name || "?")[0].toUpperCase()}
+          </div>
+          <span style={{ fontSize: 13, fontWeight: 600, color: isCurrentUser ? C.blue : "#fff" }}>
+            {entry.display_name}
+            {isCurrentUser && <span style={{ fontSize: 10, color: C.blue, marginLeft: 6 }}>(You)</span>}
+          </span>
+        </div>
+      </td>
+      <td style={{ padding: "14px 16px", fontSize: 13, fontWeight: 600, color: "#fff" }}>{entry.total_solved}</td>
+      <td style={{ padding: "14px 16px", fontSize: 13, color: C.muted }}>{entry.total_submissions}</td>
+      <td style={{ padding: "14px 16px" }}>
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
+          {Number(entry.easy_solved)   > 0 && <span style={{ padding: "2px 6px", borderRadius: 4, fontSize: 10, fontWeight: 700, background: "rgba(34,197,94,0.1)",  color: C.easy,   border: "1px solid rgba(34,197,94,0.2)"  }}>{entry.easy_solved}E</span>}
+          {Number(entry.medium_solved) > 0 && <span style={{ padding: "2px 6px", borderRadius: 4, fontSize: 10, fontWeight: 700, background: "rgba(245,158,11,0.1)", color: C.medium, border: "1px solid rgba(245,158,11,0.2)" }}>{entry.medium_solved}M</span>}
+          {Number(entry.hard_solved)   > 0 && <span style={{ padding: "2px 6px", borderRadius: 4, fontSize: 10, fontWeight: 700, background: "rgba(244,63,94,0.1)",  color: C.hard,   border: "1px solid rgba(244,63,94,0.2)"  }}>{entry.hard_solved}H</span>}
+        </div>
+      </td>
+      <td style={{ padding: "14px 16px" }}><AccuracyCell value={Number(entry.accuracy)} /></td>
+      <td style={{ padding: "14px 16px", fontSize: 14, fontWeight: 800, color: isCurrentUser ? C.blue : "#fff" }}>
+        {Number(entry.points).toLocaleString()}
+      </td>
+    </tr>
+  );
+}
+
+function RankingsTable({ entries }) {
   const podiumSize      = podiumSizeFor(entries);
   const tableEntries    = entries.slice(podiumSize);
-  const currentUserRank = entries.findIndex((e) => e.user_id === currentUserId) + 1;
-  const currentEntry    = entries.find((e) => e.user_id === currentUserId);
+  const currentUserRank = entries.findIndex((e) => e.is_current_user) + 1;
+  const currentEntry    = entries[currentUserRank - 1];
   // Repeat the current user's row under the table when they're on the podium
-  const showStickyRow   = currentUserRank > 0 && currentUserRank <= podiumSize && currentEntry;
-
-  function AccuracyCell({ value }) {
-    const color = value >= 80 ? C.easy : value >= 60 ? C.medium : C.hard;
-    return (
-      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-        <div style={{ width: 64, height: 4, background: C.container, borderRadius: 9999, overflow: "hidden" }}>
-          <div style={{ height: "100%", width: `${value}%`, background: color, borderRadius: 9999 }} />
-        </div>
-        <span style={{ fontSize: 12, color: C.muted, fontFamily: "monospace" }}>{value}%</span>
-      </div>
-    );
-  }
-
-  function Row({ entry, rank, isCurrentUser }) {
-    return (
-      <tr
-        style={{
-          borderBottom: "1px solid #23232E",
-          background: isCurrentUser ? "rgba(0,112,255,0.06)" : "transparent",
-          transition: "background 0.1s",
-        }}
-        onMouseEnter={(e) => { if (!isCurrentUser) e.currentTarget.style.background = "rgba(42,42,44,0.3)"; }}
-        onMouseLeave={(e) => { if (!isCurrentUser) e.currentTarget.style.background = "transparent"; }}
-      >
-        <td style={{ padding: "14px 16px", fontSize: 13, fontWeight: 700, color: isCurrentUser ? C.blue : C.muted, fontFamily: "monospace" }}>
-          {rank}
-        </td>
-        <td style={{ padding: "14px 16px" }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-            <div style={{
-              width: 32, height: 32, borderRadius: "50%", flexShrink: 0,
-              background: isCurrentUser ? "rgba(0,112,255,0.15)" : C.container,
-              border: `1px solid ${isCurrentUser ? "rgba(0,112,255,0.3)" : "#23232E"}`,
-              display: "flex", alignItems: "center", justifyContent: "center",
-              fontSize: 13, fontWeight: 700,
-              color: isCurrentUser ? C.blue : C.muted,
-            }}>
-              {(entry.display_name || "?")[0].toUpperCase()}
-            </div>
-            <span style={{ fontSize: 13, fontWeight: 600, color: isCurrentUser ? C.blue : "#fff" }}>
-              {entry.display_name}
-              {isCurrentUser && <span style={{ fontSize: 10, color: C.blue, marginLeft: 6 }}>(You)</span>}
-            </span>
-          </div>
-        </td>
-        <td style={{ padding: "14px 16px", fontSize: 13, fontWeight: 600, color: "#fff" }}>{entry.total_solved}</td>
-        <td style={{ padding: "14px 16px", fontSize: 13, color: C.muted }}>{entry.total_submissions}</td>
-        <td style={{ padding: "14px 16px" }}>
-          <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
-            {Number(entry.easy_solved)   > 0 && <span style={{ padding: "2px 6px", borderRadius: 4, fontSize: 10, fontWeight: 700, background: "rgba(34,197,94,0.1)",  color: C.easy,   border: "1px solid rgba(34,197,94,0.2)"  }}>{entry.easy_solved}E</span>}
-            {Number(entry.medium_solved) > 0 && <span style={{ padding: "2px 6px", borderRadius: 4, fontSize: 10, fontWeight: 700, background: "rgba(245,158,11,0.1)", color: C.medium, border: "1px solid rgba(245,158,11,0.2)" }}>{entry.medium_solved}M</span>}
-            {Number(entry.hard_solved)   > 0 && <span style={{ padding: "2px 6px", borderRadius: 4, fontSize: 10, fontWeight: 700, background: "rgba(244,63,94,0.1)",  color: C.hard,   border: "1px solid rgba(244,63,94,0.2)"  }}>{entry.hard_solved}H</span>}
-          </div>
-        </td>
-        <td style={{ padding: "14px 16px" }}><AccuracyCell value={Number(entry.accuracy)} /></td>
-        <td style={{ padding: "14px 16px", fontSize: 14, fontWeight: 800, color: isCurrentUser ? C.blue : "#fff" }}>
-          {Number(entry.points).toLocaleString()}
-        </td>
-      </tr>
-    );
-  }
+  const showStickyRow   = currentUserRank > 0 && currentUserRank <= podiumSize;
 
   return (
     <BentoCard style={{ overflow: "hidden", marginBottom: 24 }}>
@@ -200,12 +257,12 @@ function RankingsTable({ entries, currentUserId }) {
           {tableEntries.length === 0 && (
             <tr>
               <td colSpan={7} style={{ textAlign: "center", padding: 40, color: C.muted, fontSize: 13 }}>
-                Not enough participants yet.
+                {entries.length === 0 ? "No participants yet." : "No other participants yet."}
               </td>
             </tr>
           )}
           {tableEntries.map((entry, i) => (
-            <Row key={entry.user_id} entry={entry} rank={podiumSize + i + 1} isCurrentUser={entry.user_id === currentUserId} />
+            <Row key={podiumSize + i} entry={entry} rank={podiumSize + i + 1} />
           ))}
 
           {/* Current user's row repeated here if they're on the podium (not in the table) */}
@@ -216,7 +273,7 @@ function RankingsTable({ entries, currentUserId }) {
                   <span style={{ fontSize: 10, color: C.subtle }}>· · ·</span>
                 </td>
               </tr>
-              <Row entry={currentEntry} rank={currentUserRank} isCurrentUser />
+              <Row entry={currentEntry} rank={currentUserRank} />
             </>
           )}
         </tbody>
@@ -228,32 +285,33 @@ function RankingsTable({ entries, currentUserId }) {
 // ─── Page ─────────────────────────────────────────────────────────────────────
 export default function LeaderboardPage() {
   const { user }                        = useAuth();
+  const { problems: myProblems }        = useProblems();
   const [entries, setEntries]           = useState([]);
-  const [myProblems, setMyProblems]     = useState([]);
   const [loading, setLoading]           = useState(true);
   const [error, setError]               = useState(null);
   const [filterIdx, setFilterIdx]       = useState(2); // default: All Time
+  const [reloadKey, setReloadKey]       = useState(0);
 
   useEffect(() => {
     if (!user) return;
+    let cancelled = false;
     setLoading(true);
     setError(null);
-    Promise.all([
-      fetchLeaderboard({ days: TIME_FILTERS[filterIdx].days }),
-      fetchProblems({ userId: user.id }),
-    ])
-      .then(([lb, p]) => { setEntries(lb); setMyProblems(p); })
-      .catch((e) => setError(e.message))
-      .finally(() => setLoading(false));
-  }, [user, filterIdx]);
+    fetchLeaderboard({ days: TIME_FILTERS[filterIdx].days })
+      // Before leaderboard.sql is re-run, the function returns user_id instead
+      // of is_current_user — handle both.
+      .then((lb) => lb.map((e) => ({ ...e, is_current_user: e.is_current_user ?? e.user_id === user.id })))
+      .then((lb) => { if (!cancelled) setEntries(lb); })
+      .catch((e) => { if (!cancelled) setError(e.message); })
+      .finally(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
+  }, [user, filterIdx, reloadKey]);
 
   const myStats = useMemo(() => {
-    if (!user || entries.length === 0) return null;
-    const entry  = entries.find((e) => e.user_id === user.id);
-    const rank   = entries.findIndex((e) => e.user_id === user.id) + 1;
-    const streak = calcStreak(myProblems);
-    return entry ? { ...entry, rank, streak, total: entries.length } : null;
-  }, [entries, myProblems, user]);
+    const rank = entries.findIndex((e) => e.is_current_user) + 1;
+    if (!rank) return null;
+    return { ...entries[rank - 1], rank, streak: calcStreak(myProblems), total: entries.length };
+  }, [entries, myProblems]);
 
   if (loading) return <LoadingSpinner />;
 
@@ -282,15 +340,11 @@ export default function LeaderboardPage() {
         </div>
       </div>
 
-      {error && (
-        <div style={{ padding: "12px 16px", background: "rgba(147,0,10,0.2)", border: "1px solid rgba(147,0,10,0.4)", borderRadius: 8, color: "#ffb4ab", fontSize: 13, marginBottom: 24 }}>
-          {error}
-        </div>
-      )}
+      <ErrorBanner message={error} onRetry={() => setReloadKey((k) => k + 1)} />
 
-      {podiumSizeFor(entries) > 0 && <Podium entries={entries} currentUserId={user?.id} />}
+      {podiumSizeFor(entries) > 0 && <Podium entries={entries} />}
 
-      <RankingsTable entries={entries} currentUserId={user?.id} />
+      <RankingsTable entries={entries} />
 
       {/* Current user stat strip */}
       {myStats && (
@@ -298,11 +352,14 @@ export default function LeaderboardPage() {
 
           <BentoCard style={{ padding: 20, display: "flex", alignItems: "center", gap: 16 }}>
             <span className="material-symbols-outlined" style={{ color: C.blue, fontSize: 22, fontVariationSettings: "'FILL' 1" }}>emoji_events</span>
-            <div>
+            <div style={{ flex: 1, minWidth: 0 }}>
               <p style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: C.muted, marginBottom: 4 }}>Your Rank</p>
               <p style={{ fontSize: 24, fontWeight: 900, color: "#fff" }}>
-                #{myStats.rank} <span style={{ fontSize: 13, color: C.muted, fontWeight: 400 }}>of {myStats.total}</span>
+                #{myStats.rank} <span style={{ fontSize: 13, color: C.muted, fontWeight: 400 }}>of {myStats.total} as {myStats.display_name}</span>
               </p>
+              <div style={{ marginTop: 6 }}>
+                <DisplayNameEditor userId={user.id} currentName={myStats.display_name} onSaved={() => setReloadKey((k) => k + 1)} />
+              </div>
             </div>
           </BentoCard>
 
