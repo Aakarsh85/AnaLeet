@@ -1,20 +1,40 @@
 import { supabase } from "./supabase.js";
-import { subDays, format, parseISO, isWithinInterval, startOfDay, endOfDay } from "date-fns";
+import {
+  subDays, addDays, format, parseISO, isWithinInterval, startOfDay, endOfDay,
+  startOfWeek, differenceInCalendarDays,
+} from "date-fns";
 
 // ─── Fetch raw problems from Supabase ─────────────────────────────────────────
+// PostgREST caps the rows returned per request (1000 by default on Supabase),
+// so fetch page by page until every matching row has been read.
+const FETCH_PAGE_SIZE = 1000;
+
 export async function fetchProblems({ userId, from, to } = {}) {
-  let query = supabase
-    .from("problems")
-    .select("*")
-    .order("started_at", { ascending: false });
+  const pageQuery = (offset, withCount) => {
+    let query = supabase
+      .from("problems")
+      .select("*", withCount ? { count: "exact" } : {})
+      .order("started_at", { ascending: false })
+      .order("id", { ascending: true }) // stable order across pages
+      .range(offset, offset + FETCH_PAGE_SIZE - 1);
 
-  if (userId) query = query.eq("user_id", userId);
-  if (from) query = query.gte("started_at", from);
-  if (to) query = query.lte("started_at", to);
+    if (userId) query = query.eq("user_id", userId);
+    if (from) query = query.gte("started_at", from);
+    if (to) query = query.lte("started_at", to);
+    return query;
+  };
 
-  const { data, error } = await query;
-  if (error) throw error;
-  return data ?? [];
+  const rows = [];
+  let total = Infinity;
+  while (rows.length < total) {
+    const isFirstPage = rows.length === 0;
+    const { data, error, count } = await pageQuery(rows.length, isFirstPage);
+    if (error) throw error;
+    if (isFirstPage && typeof count === "number") total = count;
+    if (!data?.length) break;
+    rows.push(...data);
+  }
+  return rows;
 }
 
 export async function fetchSessions({ userId } = {}) {
@@ -28,25 +48,55 @@ export async function fetchSessions({ userId } = {}) {
   return data ?? [];
 }
 
+// ─── Dates and status ─────────────────────────────────────────────────────────
+
+/**
+ * Calendar date (YYYY-MM-DD) of a timestamp in the viewer's local time zone.
+ * Timestamps are stored in UTC, so slicing the ISO string would put late-night
+ * or early-morning solves on the wrong day.
+ */
+export function localDateKey(value) {
+  if (!value) return null;
+  const date = typeof value === "string" ? parseISO(value) : value;
+  return Number.isNaN(date.getTime()) ? null : format(date, "yyyy-MM-dd");
+}
+
+// An in_progress row that hasn't been updated for this long was left without
+// a final update (tab closed before it could report, or a record from an
+// extension version that never recorded failures). While a problem is open the
+// extension updates its row every few minutes.
+const STALE_IN_PROGRESS_MS = 60 * 60_000;
+
+/** "accepted", "failed", or "in_progress" (still being worked on). */
+export function effectiveStatus(problem, now = Date.now()) {
+  if (problem.status === "accepted" || problem.status === "failed") return problem.status;
+  const lastUpdate = Date.parse(problem.updated_at || problem.started_at || "");
+  if (Number.isNaN(lastUpdate) || now - lastUpdate > STALE_IN_PROGRESS_MS) return "failed";
+  return "in_progress";
+}
+
 // ─── Data processing helpers (all client-side) ────────────────────────────────
 
-/** Group problems by date string YYYY-MM-DD */
+/** Accepted problems per local date (YYYY-MM-DD) */
 export function groupByDate(problems) {
   return problems.reduce((acc, p) => {
-    const date = p.started_at?.slice(0, 10) ?? "unknown";
+    const date = localDateKey(p.started_at) ?? "unknown";
     acc[date] = (acc[date] || 0) + (p.status === "accepted" ? 1 : 0);
     return acc;
   }, {});
 }
 
-/** Build 365-day heatmap data */
-export function buildHeatmapData(problems) {
+/**
+ * Heatmap days covering the last year, starting on a Sunday so that each run
+ * of 7 days is one Sunday–Saturday column.
+ */
+export function buildHeatmapData(problems, today = new Date()) {
   const byDate = groupByDate(problems);
-  const today = new Date();
+  const start = startOfWeek(subDays(today, 364)); // weeks start on Sunday
   const days = [];
-  for (let i = 364; i >= 0; i--) {
-    const d = subDays(today, i);
-    const key = format(d, "yyyy-MM-dd");
+  const span = differenceInCalendarDays(today, start);
+  for (let i = 0; i <= span; i++) {
+    const key = format(addDays(start, i), "yyyy-MM-dd");
     days.push({ date: key, count: byDate[key] ?? 0 });
   }
   return days;
@@ -128,7 +178,7 @@ export function buildEfficiencyData(problems) {
 }
 
 /**
- * Session timeline data — groups problems by calendar date.
+ * Session timeline data — groups problems by local calendar date.
  * Each unique date = one "session" entry, so this works regardless
  * of whether session_id is populated on problem rows.
  */
@@ -136,7 +186,7 @@ export function buildSessionData(problems) {
   const dateMap = {};
 
   for (const p of problems) {
-    const date = p.started_at?.slice(0, 10);
+    const date = localDateKey(p.started_at);
     if (!date) continue;
     if (!dateMap[date]) dateMap[date] = { date, totalTime: 0, count: 0 };
     dateMap[date].totalTime += p.time_taken ?? 0;
@@ -237,61 +287,66 @@ export function generateInsights(problems) {
 }
 
 // ─── Streak calculation ───────────────────────────────────────────────────────
-export function calcStreak(problems) {
-  const accepted = problems.filter((p) => p.status === "accepted");
-  const dates = [...new Set(accepted.map((p) => p.started_at?.slice(0, 10)))].sort().reverse();
-  if (!dates.length) return 0;
+/**
+ * Number of consecutive local days, counting back from today, with at least
+ * one accepted solve. A streak that ended yesterday still counts, since today
+ * isn't over yet. Any missed day ends the streak.
+ */
+export function calcStreak(problems, today = new Date()) {
+  const solvedDays = new Set(
+    problems
+      .filter((p) => p.status === "accepted")
+      .map((p) => localDateKey(p.started_at))
+      .filter(Boolean)
+  );
+
+  let cursor = today;
+  if (!solvedDays.has(format(cursor, "yyyy-MM-dd"))) cursor = subDays(cursor, 1);
 
   let streak = 0;
-  let cur = new Date();
-  for (const d of dates) {
-    const expected = format(cur, "yyyy-MM-dd");
-    if (d === expected) {
-      streak++;
-      cur = subDays(cur, 1);
-    } else if (d === format(subDays(cur, 1), "yyyy-MM-dd")) {
-      streak++;
-      cur = subDays(cur, 2);
-    } else {
-      break;
-    }
+  while (solvedDays.has(format(cursor, "yyyy-MM-dd"))) {
+    streak++;
+    cursor = subDays(cursor, 1);
   }
   return streak;
 }
 
-// ─── Week key helper (internal) ───────────────────────────────────────────────
-function getWeekKey(dateStr) {
-  const d = parseISO(dateStr);
-  const diff = d.getDay() === 0 ? -6 : 1 - d.getDay();
-  const monday = new Date(d);
-  monday.setDate(d.getDate() + diff);
-  return format(monday, "MMM d");
+// ─── Weekly grouping helpers (internal) ───────────────────────────────────────
+// Monday of the timestamp's (local) week as a sortable YYYY-MM-DD key
+function weekStartKey(timestamp) {
+  return format(startOfWeek(parseISO(timestamp), { weekStartsOn: 1 }), "yyyy-MM-dd");
+}
+
+// The most recent `limit` weeks that have data, ordered oldest → newest
+function recentWeeks(weekMap, limit = 8) {
+  return Object.keys(weekMap)
+    .sort()
+    .slice(-limit)
+    .map((key) => ({ week: format(parseISO(key), "MMM d"), ...weekMap[key] }));
 }
 
 /** Weekly first-try rate over time */
 export function buildAttemptEfficiencyTrend(problems) {
   const weekMap = {};
   for (const p of problems.filter(p => p.status === "accepted" && p.started_at)) {
-    const key = getWeekKey(p.started_at);
-    if (!weekMap[key]) weekMap[key] = { week: key, total: 0, firstTry: 0 };
+    const key = weekStartKey(p.started_at);
+    if (!weekMap[key]) weekMap[key] = { total: 0, firstTry: 0 };
     weekMap[key].total++;
     if ((p.attempts || 1) === 1) weekMap[key].firstTry++;
   }
-  return Object.values(weekMap)
-    .map(w => ({ ...w, rate: Math.round((w.firstTry / w.total) * 100) }))
-    .slice(-8);
+  return recentWeeks(weekMap).map((w) => ({ ...w, rate: Math.round((w.firstTry / w.total) * 100) }));
 }
 
 /** Weekly difficulty breakdown */
 export function buildDifficultyProgressionData(problems) {
   const weekMap = {};
   for (const p of problems.filter(p => p.status === "accepted" && p.started_at)) {
-    const key = getWeekKey(p.started_at);
-    if (!weekMap[key]) weekMap[key] = { week: key, easy: 0, medium: 0, hard: 0 };
+    const key = weekStartKey(p.started_at);
+    if (!weekMap[key]) weekMap[key] = { easy: 0, medium: 0, hard: 0 };
     const d = (p.difficulty || "").toLowerCase();
     if (d in weekMap[key]) weekMap[key][d]++;
   }
-  return Object.values(weekMap).slice(-8);
+  return recentWeeks(weekMap);
 }
 
 /** Top N slowest accepted problems */

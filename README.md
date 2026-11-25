@@ -57,6 +57,8 @@ Paste the contents of each and click **Run**.
 > ⚠️ **Run them in order.** `leaderboard.sql` depends on tables created by `schema.sql`.
 > If you only have one user right now, the leaderboard backfill in Step 2 of
 > `leaderboard.sql` will create your profile row automatically.
+> `leaderboard.sql` is safe to re-run — run it again after pulling changes to
+> `get_leaderboard`.
 
 **Step 4 — Enable Google Auth (optional)**
 
@@ -183,24 +185,35 @@ rank strip at the bottom. Filterable by This Week, This Month, or All Time.
 > Points weights are defined in the `get_leaderboard` SQL function in Supabase.
 > To change them, update the function there — no dashboard code changes needed.
 
+**Submissions** is the total number of submissions made (the `attempts` column), and
+**accuracy** is accepted solves as a percentage of submissions.
+
 ---
 
 ## Database tables
 
 ### `problems`
-One row per problem attempt per session. The core table everything is built from.
+One row per problem per day (in your local time zone). Reloading the page or coming
+back to a problem later the same day continues the same row. The core table everything
+is built from.
 
 | Column | Type | Notes |
 |---|---|---|
 | `problem_name` | text | e.g. `"Two Sum"` |
 | `difficulty` | text | `easy`, `medium`, `hard`, `unknown` |
 | `tags` | text[] | e.g. `["array", "hash table"]` |
-| `time_taken` | integer | Active solving time in seconds |
-| `attempts` | integer | Number of submissions |
-| `status` | text | `in_progress`, `accepted`, `failed` |
-| `started_at` | timestamptz | When the problem was opened |
+| `time_taken` | integer | Active solving time in seconds, up to the accepted submission |
+| `attempts` | integer | Number of submissions up to and including the accepted one |
+| `status` | text | `in_progress`, `accepted`, `failed` (see below) |
+| `started_at` | timestamptz | When the problem was first opened that day |
 | `completed_at` | timestamptz | When it was accepted |
-| `session_id` | text | Groups problems from the same browser session |
+| `session_id` | text | `session_YYYY-MM-DD` — the day; part of the row's unique key |
+
+`failed` means you left the problem without an accepted submission after at least
+100 seconds of active time (shorter visits aren't recorded). If you come back and solve
+it the same day, it becomes `accepted`. The dashboard also shows an `in_progress` row as
+Failed once it hasn't been updated for an hour (for example, if the tab was closed
+before the extension could report).
 
 ### `bookmarks`
 Problems flagged for retry. Stores `problem_name`, `difficulty`, `tags`, and an optional `note`.
@@ -297,8 +310,8 @@ Sessions are derived from `session_id` groupings in the `problems` table —
 solve a few problems and they'll appear.
 
 **Problems are duplicated in the table**
-→ The extension deduplicates by `problem_name + date`. If you see duplicates in the
-dashboard it means problems were solved across different days or sessions, which is correct.
+→ The extension keeps one row per problem per day, so the same problem appearing more
+than once means it was worked on on different days, which is correct.
 
 ---
 

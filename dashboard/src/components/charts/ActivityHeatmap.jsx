@@ -1,4 +1,5 @@
 import React, { useMemo } from "react";
+import { parseISO } from "date-fns";
 import { buildHeatmapData } from "../../lib/dataProcessor.js";
 import { BentoCard, C } from "../UI.jsx";
 
@@ -16,7 +17,7 @@ function cellColor(count) {
 export default function ActivityHeatmap({ problems }) {
   const days = useMemo(() => buildHeatmapData(problems), [problems]);
 
-  // Build columns of 7 days each (weeks)
+  // Build columns of 7 days each (Sunday–Saturday weeks; days start on a Sunday)
   const weeks = [];
   for (let i = 0; i < days.length; i += 7) {
     weeks.push(days.slice(i, i + 7));
@@ -27,7 +28,7 @@ export default function ActivityHeatmap({ problems }) {
     const labels = [];
     let lastMonth = -1;
     weeks.forEach((week, wi) => {
-      const m = new Date(week[0].date).getMonth();
+      const m = parseISO(week[0].date).getMonth(); // local date, not UTC midnight
       if (m !== lastMonth) { labels.push({ wi, label: MONTHS[m] }); lastMonth = m; }
     });
     return labels;

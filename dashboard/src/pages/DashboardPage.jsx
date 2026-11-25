@@ -1,10 +1,10 @@
 import React, { useState, useEffect, useMemo } from "react";
 import { useAuth } from "../App.jsx";
 import { fetchProblems } from "../lib/dataProcessor.js";
-import { buildDifficultyData, calcStreak, generateInsights } from "../lib/dataProcessor.js";
+import { buildDifficultyData, calcStreak, generateInsights, effectiveStatus, localDateKey } from "../lib/dataProcessor.js";
 import ActivityHeatmap from "../components/charts/ActivityHeatmap.jsx";
 import TimeTrendChart from "../components/charts/TimeTrendChart.jsx";
-import { BentoCard, StatCard, InsightCard, DiffBadge, C, LoadingSpinner } from "../components/UI.jsx";
+import { BentoCard, StatCard, InsightCard, DiffBadge, STATUS_META, C, LoadingSpinner } from "../components/UI.jsx";
 
 function RecentSolves({ problems }) {
   const recent = problems.slice(0, 6);
@@ -14,7 +14,7 @@ function RecentSolves({ problems }) {
       <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
         {recent.length === 0 && <p style={{ color: C.muted, fontSize: 13 }}>No solves recorded yet.</p>}
         {recent.map((p, i) => {
-          const isAccepted = p.status === "accepted";
+          const status = STATUS_META[effectiveStatus(p)];
           const mins = Math.floor((p.time_taken || 0) / 60);
           const secs = ((p.time_taken || 0) % 60).toString().padStart(2, "0");
           const timeAgo = p.started_at
@@ -34,9 +34,9 @@ function RecentSolves({ problems }) {
                   <span className="material-symbols-outlined" style={{ fontSize: 14 }}>timer</span>
                   {mins}m {secs}s
                 </span>
-                <span style={{ display: "flex", alignItems: "center", gap: 4, color: isAccepted ? "#22c55e" : "#f43f5e" }}>
-                  <span className="material-symbols-outlined" style={{ fontSize: 14, fontVariationSettings: "'FILL' 1" }}>{isAccepted ? "check_circle" : "cancel"}</span>
-                  {isAccepted ? "Accepted" : "Failed"}
+                <span style={{ display: "flex", alignItems: "center", gap: 4, color: status.color }}>
+                  <span className="material-symbols-outlined" style={{ fontSize: 14, fontVariationSettings: "'FILL' 1" }}>{status.icon}</span>
+                  {status.label}
                 </span>
                 {p.attempts > 1 && <span>{p.attempts} attempts</span>}
               </div>
@@ -105,8 +105,8 @@ export default function DashboardPage() {
       : 0;
     const streak = calcStreak(problems);
     const insights = generateInsights(problems);
-    const today = new Date().toISOString().slice(0, 10);
-    const todayCount = accepted.filter(p => p.started_at?.slice(0, 10) === today).length;
+    const today = localDateKey(new Date());
+    const todayCount = accepted.filter(p => localDateKey(p.started_at) === today).length;
     return { total: accepted.length, avgTime, streak, insights, todayCount };
   }, [problems]);
 

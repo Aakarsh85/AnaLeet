@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo } from "react";
 import { useAuth } from "../App.jsx";
-import { fetchProblems, generateInsights, buildTopicData } from "../lib/dataProcessor.js";
-import { BentoCard, DiffBadge, InsightCard, C, LoadingSpinner } from "../components/UI.jsx";
+import { fetchProblems, generateInsights, buildTopicData, effectiveStatus } from "../lib/dataProcessor.js";
+import { BentoCard, DiffBadge, InsightCard, StatusBadge, C, LoadingSpinner } from "../components/UI.jsx";
 
 const PAGE_SIZE = 15;
 
@@ -33,7 +33,7 @@ export default function ProblemsPage() {
       if (search && !p.problem_name?.toLowerCase().includes(search.toLowerCase())) return false;
       if (diffFilter !== "all" && p.difficulty?.toLowerCase() !== diffFilter) return false;
       if (tagFilter && !(p.tags || []).includes(tagFilter)) return false;
-      if (statusFilter !== "all" && p.status !== statusFilter) return false;
+      if (statusFilter !== "all" && effectiveStatus(p) !== statusFilter) return false;
       return true;
     });
   }, [problems, search, diffFilter, tagFilter, statusFilter]);
@@ -92,6 +92,7 @@ export default function ProblemsPage() {
               <option value="all">All Status</option>
               <option value="accepted">Accepted</option>
               <option value="in_progress">In Progress</option>
+              <option value="failed">Failed</option>
             </select>
 
             <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
@@ -146,12 +147,7 @@ export default function ProblemsPage() {
                       <td style={{ padding: "14px 16px", fontFamily: "monospace", fontSize: 12, color: "#8c90a1" }}>{mins}m {secs}s</td>
                       <td style={{ padding: "14px 16px", fontSize: 13, color: "#8c90a1", textAlign: "center" }}>{p.attempts || 1}</td>
                       <td style={{ padding: "14px 16px" }}>
-                        <div style={{ display: "flex", alignItems: "center", gap: 6, color: p.status === "accepted" ? "#22c55e" : "#f43f5e" }}>
-                          <span className="material-symbols-outlined" style={{ fontSize: 16, fontVariationSettings: "'FILL' 1" }}>
-                            {p.status === "accepted" ? "check_circle" : "cancel"}
-                          </span>
-                          <span style={{ fontSize: 12, fontWeight: 700 }}>{p.status === "accepted" ? "Accepted" : "Failed"}</span>
-                        </div>
+                        <StatusBadge status={effectiveStatus(p)} />
                       </td>
                     </tr>
                   );

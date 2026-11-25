@@ -1,16 +1,27 @@
 /**
  * LeetFlow Content Script
- * Runs on leetcode.com/problems/* pages
- * Silently tracks problem-solving activity with active-time-only measurement.
+ * Injected on every leetcode.com page (LeetCode is a single-page app, so the
+ * user can move from the problem list to a problem without a page load) and
+ * tracks activity while the URL is a /problems/* page.
+ *
+ * Measures active time only and produces one record per problem per local
+ * calendar day. Progress is saved to chrome.storage.local, so reloading the
+ * page or coming back to the problem later the same day continues the same
+ * record instead of starting a new one.
  */
 
 (function () {
   "use strict";
 
   // ─── Constants ────────────────────────────────────────────────────────────
-  const IDLE_THRESHOLD_MS = 1800_000;    // 1800 s (30 minutes) of no interaction → idle
-  const SYNC_INTERVAL_MS = 5 * 60_000; // flush locally every 5 min
-  const MIN_ACTIVE_MS    = 100_000;     // ignore problems opened for less than 1 min
+  const IDLE_THRESHOLD_MS   = 1800_000;    // 30 min of no interaction → idle
+  const SYNC_INTERVAL_MS    = 5 * 60_000;  // flush locally every 5 min
+  // Problems that were never accepted and have less active time than this are
+  // discarded. Keep in sync with MIN_TIME_TAKEN_S in background.js.
+  const MIN_ACTIVE_MS       = 100_000;
+  const PERSIST_INTERVAL_MS = 10_000;      // how often progress is saved for resuming
+  const URL_POLL_MS         = 1000;        // how often to check for SPA navigation
+  const VISIT_KEY_PREFIX    = "lf_visit_";
   const EVENTS = {
     PROBLEM_OPENED: "problem_opened",
     FIRST_INTERACTION: "first_interaction",
@@ -20,29 +31,41 @@
   };
 
   // ─── State ─────────────────────────────────────────────────────────────────
-  let state = {
-    problemName: "",
-    difficulty: "",
-    tags: [],
-    sessionId: "",
-    startedAt: null,
-    activeMs: 0,
-    attempts: 0,
-    status: "in_progress",
-    isTracking: false,
-    isIdle: false,
-    isVisible: true,
-    lastActivityAt: null,
-    lastTickAt: null,
-    hasFirstInteraction: false,
-    acceptedSubmissionId: null,
-    pendingSubmissionId: null, // bridges submitCode → submissionDetails
-    tickTimer: null,
-    idleTimer: null,
-  };
+  function initialState() {
+    return {
+      problemName: "",
+      difficulty: "",
+      tags: [],
+      sessionId: "",
+      visitKey: "",        // chrome.storage key holding this problem's progress today
+      startedAt: null,
+      completedAt: null,   // set once, when the accepted verdict arrives
+      activeMs: 0,
+      attempts: 0,
+      status: "in_progress",
+      isTracking: false,   // false before init finishes and after the problem is accepted
+      isIdle: false,
+      isVisible: document.visibilityState === "visible",
+      lastActivityAt: null,
+      lastTickAt: null,
+      lastPersistAt: 0,
+      hasFirstInteraction: false,
+      acceptedSubmissionId: null,
+      pendingSubmissionId: null, // bridges submit → check / submitCode → submissionDetails
+      tickTimer: null,
+      idleTimer: null,
+    };
+  }
+
+  let state = initialState();
 
   // Tracks the current problem slug so SPA navigation can detect a real change
   let currentSlug = "";
+  let lastPath = window.location.pathname;
+
+  // Incremented whenever a visit ends, so an init still waiting on storage can
+  // tell that the user has already navigated elsewhere.
+  let initToken = 0;
 
   // Holds the MutationObserver from watchRunButton so it can be disconnected
   // before re-attaching on SPA navigation
@@ -61,9 +84,18 @@
   }
 
   // ─── Helpers ───────────────────────────────────────────────────────────────
+  // Returns the problem slug, or "" when the current page isn't a problem.
   function parseProblemSlug() {
     const match = window.location.pathname.match(/\/problems\/([\w-]+)/);
-    return match ? match[1] : "unknown";
+    return match ? match[1] : "";
+  }
+
+  // YYYY-MM-DD in the user's local time zone
+  function localDateKey(date = new Date()) {
+    const y = date.getFullYear();
+    const m = String(date.getMonth() + 1).padStart(2, "0");
+    const d = String(date.getDate()).padStart(2, "0");
+    return `${y}-${m}-${d}`;
   }
 
   function scrapeProblemMeta() {
@@ -98,21 +130,71 @@
     return { title, difficulty, tags };
   }
 
-  function getOrCreateSessionId() {
-    // Group by date — simple daily sessions
-    const today = new Date().toISOString().slice(0, 10);
-    return `session_${today}_${Date.now()}`;
+  // ─── Saved progress (resume after reload / revisit) ────────────────────────
+  async function loadVisit(key) {
+    if (!isContextValid()) return null;
+    try {
+      const items = await chrome.storage.local.get(key);
+      return items?.[key] ?? null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function persistVisit() {
+    if (!state.visitKey || !isContextValid()) return;
+    state.lastPersistAt = Date.now();
+    try {
+      chrome.storage.local
+        .set({
+          [state.visitKey]: {
+            problemName: state.problemName,
+            activeMs: state.activeMs,
+            attempts: state.attempts,
+            status: state.status,
+            startedAt: state.startedAt,
+            completedAt: state.completedAt,
+          },
+        })
+        .catch(() => {});
+    } catch (_) {}
+  }
+
+  // Saved progress is only needed for the current day.
+  async function pruneOldVisits() {
+    if (!isContextValid()) return;
+    try {
+      const todayPrefix = `${VISIT_KEY_PREFIX}${localDateKey()}_`;
+      const all = await chrome.storage.local.get(null);
+      const stale = Object.keys(all).filter(
+        (k) => k.startsWith(VISIT_KEY_PREFIX) && !k.startsWith(todayPrefix)
+      );
+      if (stale.length) await chrome.storage.local.remove(stale);
+    } catch (_) {}
   }
 
   // ─── Active-time ticker ─────────────────────────────────────────────────────
+  function isCounting() {
+    return state.isTracking && !state.isIdle && state.isVisible;
+  }
+
+  // Adds the time since the last tick if the user was actively working.
+  function accumulate() {
+    const now = Date.now();
+    if (isCounting() && state.lastTickAt) {
+      state.activeMs += now - state.lastTickAt;
+    }
+    state.lastTickAt = now;
+  }
+
   function startTick() {
     if (state.tickTimer) return;
     state.lastTickAt = Date.now();
     state.tickTimer = setInterval(() => {
-      if (!state.isTracking || state.isIdle || !state.isVisible) return;
-      const now = Date.now();
-      state.activeMs += now - state.lastTickAt;
-      state.lastTickAt = now;
+      accumulate();
+      if (state.isTracking && Date.now() - state.lastPersistAt >= PERSIST_INTERVAL_MS) {
+        persistVisit();
+      }
     }, 500);
   }
 
@@ -125,28 +207,29 @@
   function resetIdleTimer() {
     clearTimeout(state.idleTimer);
     if (state.isIdle) {
+      accumulate(); // moves lastTickAt forward without counting the idle period
       state.isIdle = false;
-      state.lastTickAt = Date.now();
     }
     state.idleTimer = setTimeout(() => {
+      accumulate();
       state.isIdle = true;
     }, IDLE_THRESHOLD_MS);
   }
 
   // ─── Visibility handling ────────────────────────────────────────────────────
   document.addEventListener("visibilitychange", () => {
+    accumulate(); // count up to the moment the tab was hidden; skip the hidden period
     state.isVisible = document.visibilityState === "visible";
-    if (state.isVisible) {
-      state.lastTickAt = Date.now();
-    }
+    if (!state.isVisible && state.isTracking) persistVisit();
   });
 
   // ─── User interaction listeners ─────────────────────────────────────────────
   function onInteraction() {
+    if (!state.isTracking) return;
     state.lastActivityAt = Date.now();
     resetIdleTimer();
 
-    if (!state.hasFirstInteraction && state.isTracking) {
+    if (!state.hasFirstInteraction) {
       state.hasFirstInteraction = true;
       sendEvent(EVENTS.FIRST_INTERACTION);
     }
@@ -169,7 +252,9 @@
     // ── SUBMIT: capture submission ID, increment attempts ──────────────────
     if (msg.type === "SUBMIT") {
       const submissionId = msg.submissionId;
-      if (!submissionId) return;
+      // Not tracking = not initialised yet, or already accepted (later
+      // submissions are not attempts toward solving it).
+      if (!submissionId || !state.isTracking) return;
 
       state.attempts += 1;
       state.pendingSubmissionId = submissionId;
@@ -186,15 +271,14 @@
 
     // ── CHECK: terminal result from polling endpoint ────────────────────────
     if (msg.type === "CHECK") {
-      const { submissionId, statusCode, statusMsg, statusRuntime } = msg;
+      const { submissionId, statusCode, statusMsg } = msg;
       if (!submissionId || state.pendingSubmissionId !== submissionId) return;
 
       // Always clear pending — terminal result regardless of outcome
       state.pendingSubmissionId = null;
 
       if (statusCode === 10 || statusMsg === "Accepted") {
-        const runtimeMs = statusRuntime ? parseInt(statusRuntime, 10) : null;
-        handleAccepted({ submissionId, runtimeMs });
+        handleAccepted({ submissionId });
       }
     }
 
@@ -208,12 +292,11 @@
     try {
       // ── Case 1: submitCode ─────────────────────────────────────────────────
       // Shape: { submissionId } only — no status yet.
-      // This is the ONLY place we increment attempts.
       const submitCode = data?.data?.submitCode;
       if (submitCode) {
         const submissionId =
           submitCode.submissionId ?? submitCode.submission_id ?? submitCode.id;
-        if (!submissionId) return;
+        if (!submissionId || !state.isTracking) return;
 
         // ✅ Prevent duplicate increments
         if (state.pendingSubmissionId === submissionId) return;
@@ -252,8 +335,7 @@
         state.pendingSubmissionId = null;
 
         if (statusCode === 10 || details.statusDisplay === "Accepted") {
-          const runtimeMs = details.runtimeMs ?? details.runtime ?? null;
-          handleAccepted({ submissionId, runtimeMs });
+          handleAccepted({ submissionId });
         }
 
         return;
@@ -298,18 +380,27 @@
   }
 
   // ─── Accepted flow ──────────────────────────────────────────────────────────
-  function handleAccepted({ submissionId, runtimeMs }) {
-    if (state.status === "accepted") return; // Deduplicate
+  // Accepting a problem finalises its record: the timer stops, the completion
+  // time is fixed, and nothing more is added for the rest of the day.
+  function handleAccepted({ submissionId }) {
+    if (!state.isTracking || state.status === "accepted") return; // Deduplicate
+
+    accumulate(); // count active time right up to the verdict
+    stopTick();
+    clearTimeout(state.idleTimer);
 
     state.status = "accepted";
+    state.completedAt = new Date().toISOString();
     state.acceptedSubmissionId = submissionId;
+    state.isTracking = false;
 
+    persistVisit();
     sendEvent(EVENTS.ACCEPTED);
     flushToBackground({ final: true });
   }
 
   // ─── Data serialization ─────────────────────────────────────────────────────
-  function buildRecord() {
+  function buildRecord(overrides = {}) {
     return {
       problem_name: state.problemName,
       difficulty: state.difficulty,
@@ -318,40 +409,54 @@
       attempts: state.attempts,
       status: state.status,
       started_at: state.startedAt,
-      completed_at: state.status === "accepted" ? new Date().toISOString() : null,
+      completed_at: state.completedAt,
       session_id: state.sessionId,
+      ...overrides,
     };
   }
 
-  function sendEvent(type, extra = {}) {
+  function sendEvent(type) {
     if (!isContextValid()) return;
     try {
       chrome.runtime.sendMessage({
         type: "LEETFLOW_EVENT",
         event: type,
-        data: { ...buildRecord(), ...extra },
+        data: buildRecord(),
       });
     } catch (_) {}
   }
 
-  function flushToBackground({ final = false } = {}) {
+  function flushToBackground({ final = false, status } = {}) {
     if (!isContextValid()) return;
+    if (state.isTracking) {
+      accumulate();
+      persistVisit();
+    }
     try {
       chrome.runtime.sendMessage({
         type: "LEETFLOW_FLUSH",
-        data: buildRecord(),
+        data: buildRecord(status ? { status } : {}),
         final,
       });
     } catch (_) {}
   }
 
   // ─── Eligible flush ────────────────────────────────────────────────────────
-  // Only flush non-accepted problems as final if the user was actively engaged
-  // for at least MIN_ACTIVE_MS. Skipping short visits prevents cluttering the
-  // dashboard with "failed" records for problems merely glanced at.
+  // A final flush of a problem that wasn't accepted is recorded as "failed",
+  // but only if the user was actively engaged for at least MIN_ACTIVE_MS.
+  // Skipping short visits prevents cluttering the dashboard with "failed"
+  // records for problems merely glanced at.
   function flushIfEligible({ final = false } = {}) {
-    if (final && state.status !== "accepted" && state.activeMs < MIN_ACTIVE_MS) {
-      return; // Too short — discard silently
+    if (final && state.status !== "accepted") {
+      accumulate();
+      if (state.activeMs < MIN_ACTIVE_MS) {
+        persistVisit(); // keep the time in case the user comes back today
+        return; // Too short — discard silently
+      }
+      // Only the synced record says "failed"; the saved progress stays
+      // in_progress so a later visit today can still finish it.
+      flushToBackground({ final, status: "failed" });
+      return;
     }
     flushToBackground({ final });
   }
@@ -361,114 +466,116 @@
     if (state.isTracking && isContextValid()) flushIfEligible();
   }, SYNC_INTERVAL_MS);
 
-  // ─── State reset (called on SPA navigation to a new problem) ───────────────
-  function resetState() {
+  // ─── Ending a visit (navigation away, unload) ──────────────────────────────
+  function endVisit() {
+    if (state.isTracking) flushIfEligible({ final: true });
     stopTick();
     clearTimeout(state.idleTimer);
-
-    state.problemName = "";
-    state.difficulty = "";
-    state.tags = [];
-    state.sessionId = "";
-    state.startedAt = null;
-    state.activeMs = 0;
-    state.attempts = 0;
-    state.status = "in_progress";
-    state.isTracking = false;
-    state.isIdle = false;
-    state.lastActivityAt = null;
-    state.lastTickAt = null;
-    state.hasFirstInteraction = false;
-    state.acceptedSubmissionId = null;
-    state.pendingSubmissionId = null;
-    state.tickTimer = null;
-    state.idleTimer = null;
+    initToken++; // cancels an init that is still loading saved progress
+    state = initialState();
   }
 
   // ─── Init ───────────────────────────────────────────────────────────────────
-  function init() {
+  async function init(slug) {
+    const token = ++initToken;
+    const day = localDateKey();
+    const visitKey = `${VISIT_KEY_PREFIX}${day}_${slug}`;
+    const saved = await loadVisit(visitKey);
+    if (token !== initToken) return; // user navigated away while loading
+
     const { title, difficulty, tags } = scrapeProblemMeta();
 
-    state.problemName = title;
+    // If the title hasn't rendered yet (scrape fell back to the slug), reuse
+    // the name saved earlier today so the record keeps the same identity.
+    state.problemName = title === slug && saved?.problemName ? saved.problemName : title;
     state.difficulty = difficulty;
     state.tags = tags;
-    state.sessionId = getOrCreateSessionId();
-    state.startedAt = new Date().toISOString();
-    state.isTracking = true;
+    // One record per problem per local day: matches the database's unique key
+    // (user_id, problem_name, session_id).
+    state.sessionId = `session_${day}`;
+    state.visitKey = visitKey;
 
+    if (saved) {
+      state.activeMs = saved.activeMs ?? 0;
+      state.attempts = saved.attempts ?? 0;
+      state.startedAt = saved.startedAt ?? new Date().toISOString();
+      state.completedAt = saved.completedAt ?? null;
+      state.status = saved.status === "accepted" ? "accepted" : "in_progress";
+    } else {
+      state.startedAt = new Date().toISOString();
+    }
+
+    // Already accepted earlier today — the record is final, nothing to track.
+    if (state.status === "accepted") return;
+
+    state.isTracking = true;
     sendEvent(EVENTS.PROBLEM_OPENED);
     startTick();
     resetIdleTimer();
     watchRunButton();
 
-    // Re-scrape after hydration (React pages may load late)
+    // Re-scrape after hydration (React pages may load late, and after SPA
+    // navigation the previous problem's title can still be on screen).
     setTimeout(() => {
+      if (token !== initToken) return;
       const updated = scrapeProblemMeta();
-      state.problemName = updated.title;
-      state.difficulty = updated.difficulty;
-      state.tags = updated.tags;
+      if (updated.title !== slug) state.problemName = updated.title;
+      if (updated.difficulty !== "unknown") state.difficulty = updated.difficulty;
+      if (updated.tags.length) state.tags = updated.tags;
     }, 3000);
   }
 
   // ─── SPA navigation detection ───────────────────────────────────────────────
-  // LeetCode uses history.pushState — navigating between problems is never a
-  // real page load. We intercept pushState and popstate to detect URL changes
-  // and re-init tracking when the user lands on a new problem.
+  // LeetCode navigates with history.pushState, which a content script can't
+  // intercept (it runs in an isolated world, so wrapping history.pushState here
+  // doesn't affect the page's own calls). Instead, check the URL periodically
+  // and on back/forward navigation.
   function onUrlChange() {
+    const path = window.location.pathname;
+    if (path === lastPath) return;
+    lastPath = path;
+
     const slug = parseProblemSlug();
-    const isProblemPage = /\/problems\//.test(window.location.pathname);
+    if (slug === currentSlug) return; // Same problem (e.g. Description → Submissions tab)
 
-    if (!isProblemPage) {
-      // Navigated away from problems entirely — flush and stop.
-      // If already accepted, stats were counted by handleAccepted — don't re-trigger.
-      if (state.isTracking) flushIfEligible({ final: state.status !== "accepted" });
-      resetState();
-      currentSlug = "";
-      return;
-    }
-
-    if (slug === currentSlug) return; // Same problem (e.g. tab switch) — do nothing
-
-    // New problem — flush previous session if mid-tracking, then re-init.
-    // If already accepted, stats were counted by handleAccepted — don't re-trigger.
-    if (state.isTracking) flushIfEligible({ final: state.status !== "accepted" });
-    resetState();
+    // Different problem, or left the problems pages: finish the current visit.
+    endVisit();
     currentSlug = slug;
+    if (!slug) return;
 
     // Small delay to let LeetCode's React router finish rendering the new page
-    setTimeout(init, 800);
+    setTimeout(() => {
+      if (currentSlug === slug) init(slug);
+    }, 800);
   }
 
-  // Wrap history.pushState to fire our handler
-  const _origPushState = history.pushState.bind(history);
-  history.pushState = function (...args) {
-    _origPushState(...args);
-    onUrlChange();
-  };
-
-  const _origReplaceState = history.replaceState.bind(history);
-  history.replaceState = function (...args) {
-    _origReplaceState(...args);
-    onUrlChange();
-  };
-
-  // Back / forward navigation
   window.addEventListener("popstate", onUrlChange);
+  const urlPoll = setInterval(() => {
+    if (!isContextValid()) {
+      // Extension was reloaded or removed — this copy of the script is orphaned.
+      clearInterval(urlPoll);
+      stopTick();
+      return;
+    }
+    onUrlChange();
+  }, URL_POLL_MS);
 
   // ─── Initial page load ──────────────────────────────────────────────────────
-  if (/\/problems\//.test(window.location.pathname)) {
-    currentSlug = parseProblemSlug();
+  pruneOldVisits();
+  currentSlug = parseProblemSlug();
+  if (currentSlug) {
+    const slug = currentSlug;
     if (document.readyState === "loading") {
-      document.addEventListener("DOMContentLoaded", init);
+      document.addEventListener("DOMContentLoaded", () => init(slug));
     } else {
-      init();
+      init(slug);
     }
   }
 
   // ─── Cleanup on hard unload ─────────────────────────────────────────────────
   window.addEventListener("beforeunload", () => {
-    // If already accepted, stats were counted by handleAccepted — don't re-trigger.
-    if (state.isTracking) flushIfEligible({ final: state.status !== "accepted" });
+    // If already accepted, the final record was sent by handleAccepted.
+    if (state.isTracking) flushIfEligible({ final: true });
     stopTick();
   });
 
@@ -476,6 +583,7 @@
   try {
     chrome.runtime.onMessage.addListener((msg, _sender, respond) => {
       if (msg.type === "GET_CURRENT_SESSION") {
+        accumulate();
         respond({
           activeMs: state.activeMs,
           problemName: state.problemName,

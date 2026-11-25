@@ -13,6 +13,13 @@ const TIME_FILTERS = [
 
 const RANK_ACCENT = { 1: "#f59e0b", 2: C.muted, 3: C.orange };
 
+// The podium is only shown once there are at least 3 entries; until then
+// everyone is listed in the rankings table.
+const PODIUM_SIZE = 3;
+function podiumSizeFor(entries) {
+  return entries.length >= PODIUM_SIZE ? PODIUM_SIZE : 0;
+}
+
 // ─── Data fetching ────────────────────────────────────────────────────────────
 async function fetchLeaderboard({ days }) {
   const dateFrom = days
@@ -101,11 +108,12 @@ function Podium({ entries, currentUserId }) {
 
 // ─── Rankings table ───────────────────────────────────────────────────────────
 function RankingsTable({ entries, currentUserId }) {
-  const tableEntries    = entries.slice(3);
+  const podiumSize      = podiumSizeFor(entries);
+  const tableEntries    = entries.slice(podiumSize);
   const currentUserRank = entries.findIndex((e) => e.user_id === currentUserId) + 1;
   const currentEntry    = entries.find((e) => e.user_id === currentUserId);
-  // Show sticky current-user row only if they're in top 3 (not visible in table)
-  const showStickyRow   = currentUserRank > 0 && currentUserRank <= 3 && currentEntry;
+  // Repeat the current user's row under the table when they're on the podium
+  const showStickyRow   = currentUserRank > 0 && currentUserRank <= podiumSize && currentEntry;
 
   function AccuracyCell({ value }) {
     const color = value >= 80 ? C.easy : value >= 60 ? C.medium : C.hard;
@@ -197,10 +205,10 @@ function RankingsTable({ entries, currentUserId }) {
             </tr>
           )}
           {tableEntries.map((entry, i) => (
-            <Row key={entry.user_id} entry={entry} rank={i + 4} isCurrentUser={entry.user_id === currentUserId} />
+            <Row key={entry.user_id} entry={entry} rank={podiumSize + i + 1} isCurrentUser={entry.user_id === currentUserId} />
           ))}
 
-          {/* Sticky current-user row if they're in top 3 (shown in podium, not table) */}
+          {/* Current user's row repeated here if they're on the podium (not in the table) */}
           {showStickyRow && (
             <>
               <tr>
@@ -280,7 +288,7 @@ export default function LeaderboardPage() {
         </div>
       )}
 
-      {entries.length >= 3 && <Podium entries={entries} currentUserId={user?.id} />}
+      {podiumSizeFor(entries) > 0 && <Podium entries={entries} currentUserId={user?.id} />}
 
       <RankingsTable entries={entries} currentUserId={user?.id} />
 

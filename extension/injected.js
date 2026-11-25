@@ -53,9 +53,12 @@
       }
 
       // ── GraphQL fallback ───────────────────────────────────────────────────
+      // Only forward submission-related responses; this script runs on every
+      // LeetCode page and most GraphQL traffic is irrelevant.
       if (url.includes("/graphql")) {
         const clone = response.clone();
         clone.json().then((data) => {
+          if (!data?.data?.submitCode && !data?.data?.submissionDetails) return;
           window.postMessage({
             source: "leetflow-injected",
             type: "GRAPHQL",

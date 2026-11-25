@@ -58,14 +58,22 @@ const INSIGHTS = [
 let sessionMs = 0;
 let timerInterval = null;
 
-function startPopupTimer(initialMs) {
+function renderTimer(ms) {
+  const { min, sec } = formatMs(ms);
+  timerMin.textContent = min;
+  timerSec.textContent = sec;
+}
+
+// Shows the tracked time, and keeps it counting only while the problem is
+// still being tracked (it stops once the problem is accepted).
+function startPopupTimer(initialMs, isTracking) {
   sessionMs = initialMs;
   clearInterval(timerInterval);
+  renderTimer(sessionMs);
+  if (!isTracking) return;
   timerInterval = setInterval(() => {
     sessionMs += 1000;
-    const { min, sec } = formatMs(sessionMs);
-    timerMin.textContent = min;
-    timerSec.textContent = sec;
+    renderTimer(sessionMs);
   }, 1000);
 }
 
@@ -96,7 +104,7 @@ async function queryActiveTab() {
     difficultyBadge.className = `px-2 py-0.5 rounded-full text-[9px] font-bold uppercase tracking-tighter border shrink-0 ${style.bg} ${style.text} ${style.border}`;
 
     // Timer
-    startPopupTimer(session.activeMs || 0);
+    startPopupTimer(session.activeMs || 0, session.isTracking);
 
     // Status icon
     if (session.status === "accepted") {

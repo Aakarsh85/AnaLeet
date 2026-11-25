@@ -60,14 +60,21 @@ export function DiffBadge({ diff }) {
   );
 }
 
+// Keyed by effectiveStatus() from dataProcessor.js
+export const STATUS_META = {
+  accepted:    { label: "Accepted",    color: C.easy,   icon: "check_circle" },
+  in_progress: { label: "In Progress", color: C.medium, icon: "pending" },
+  failed:      { label: "Failed",      color: C.hard,   icon: "cancel" },
+};
+
 export function StatusBadge({ status }) {
-  const isAccepted = status === "accepted";
+  const s = STATUS_META[status] || STATUS_META.failed;
   return (
-    <div style={{ display: "flex", alignItems: "center", gap: 6, color: isAccepted ? "#22c55e" : "#f43f5e" }}>
+    <div style={{ display: "flex", alignItems: "center", gap: 6, color: s.color }}>
       <span className="material-symbols-outlined" style={{ fontSize: 16, fontVariationSettings: "'FILL' 1" }}>
-        {isAccepted ? "check_circle" : "cancel"}
+        {s.icon}
       </span>
-      <span style={{ fontSize: 12, fontWeight: 700 }}>{isAccepted ? "Accepted" : "Not Accepted"}</span>
+      <span style={{ fontSize: 12, fontWeight: 700 }}>{s.label}</span>
     </div>
   );
 }

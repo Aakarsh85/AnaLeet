@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo } from "react";
 import { BarChart, Bar, LineChart, Line, XAxis, YAxis, Tooltip, Legend, ResponsiveContainer, Cell, RadarChart, PolarGrid, PolarAngleAxis, Radar } from "recharts";
 import { useAuth } from "../App.jsx";
-import { fetchProblems, buildSessionData, buildAttemptEfficiencyTrend, buildDifficultyProgressionData, buildSlowestProblems } from "../lib/dataProcessor.js";
+import { fetchProblems, buildSessionData, buildAttemptEfficiencyTrend, buildDifficultyProgressionData, buildSlowestProblems, localDateKey } from "../lib/dataProcessor.js";
 import { PeakHoursChart, EfficiencyChart } from "../components/charts/PerformanceCharts.jsx";
 import TopicChart from "../components/charts/TopicChart.jsx";
 import { BentoCard, C, LoadingSpinner } from "../components/UI.jsx";
@@ -12,7 +12,7 @@ function BurnoutMeter({ problems }) {
   const recent = problems.filter(p => new Date(p.started_at) > subDays(new Date(), 14));
   const dayTimes = {};
   recent.forEach(p => {
-    const d = p.started_at?.slice(0, 10);
+    const d = localDateKey(p.started_at);
     if (d) dayTimes[d] = (dayTimes[d] || 0) + (p.time_taken || 0);
   });
   const heavyDays = Object.values(dayTimes).filter(t => t > 7200).length;
